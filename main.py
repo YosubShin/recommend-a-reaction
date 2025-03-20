@@ -7,10 +7,11 @@ import argparse
 import json
 import concurrent.futures
 import threading
+import whisper  # For transcription
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
-    description='Download and split YouTube videos into scenes')
+    description='Download, split YouTube videos into scenes, and transcribe them')
 parser.add_argument('--output_dir', type=str, default='./output',
                     help='Output directory for all files')
 parser.add_argument('--workers', type=int, default=1,
@@ -25,6 +26,8 @@ SCENES_DIR = os.path.join(OUTPUT_DIR, 'scenes')
 METADATA_CSV = os.path.join(OUTPUT_DIR, 'metadata.csv')
 # Directory for scene info JSON files
 SCENE_INFO_DIR = os.path.join(OUTPUT_DIR, 'scene_info')
+# Directory for transcriptions
+TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, 'transcripts')
 # Number of parallel workers
 NUM_WORKERS = args.workers
 
@@ -35,6 +38,11 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(VIDEOS_DIR, exist_ok=True)
 os.makedirs(SCENES_DIR, exist_ok=True)
 os.makedirs(SCENE_INFO_DIR, exist_ok=True)  # Create scene info directory
+os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)  # Create transcripts directory
+
+# Load whisper turbo model
+print("Loading Whisper turbo model for transcription...")
+whisper_model = whisper.load_model("turbo")
 
 
 def download_video(video_id):
@@ -112,8 +120,103 @@ def detect_and_split_scenes(video_path, video_id):
     return scenes
 
 
+def transcribe_scene(scene_path, video_id, scene_idx, language=None):
+    """
+    Transcribe a single scene using Whisper
+
+    Args:
+        scene_path: Path to the scene audio/video file
+        video_id: YouTube video ID
+        scene_idx: Scene index number
+        language: Optional language code (e.g., 'en', 'es', 'fr', etc.)
+                 If None, Whisper will auto-detect the language
+    """
+    # Create video-specific transcript directory
+    video_transcript_dir = os.path.join(TRANSCRIPTS_DIR, video_id)
+    os.makedirs(video_transcript_dir, exist_ok=True)
+
+    # Define output path for transcript
+    transcript_filename = f"scene_{scene_idx}.json"
+    transcript_path = os.path.join(video_transcript_dir, transcript_filename)
+
+    # Check if transcript already exists
+    if os.path.exists(transcript_path):
+        print(f"Transcript already exists for {video_id} scene {scene_idx}")
+        with open(transcript_path, 'r') as f:
+            return json.load(f)
+
+    try:
+        print(f"Transcribing {video_id} scene {scene_idx}...")
+
+        # If language is specified, use it; otherwise let Whisper auto-detect
+        if language:
+            result = whisper_model.transcribe(scene_path, language=language)
+            print(f"Transcribing using specified language: {language}")
+        else:
+            result = whisper_model.transcribe(scene_path)
+            print(
+                f"Transcribing with auto-detected language: {result.get('language', 'unknown')}")
+
+        # Save transcript to file
+        with open(transcript_path, 'w') as f:
+            json.dump(result, f, indent=2)
+
+        return result
+    except Exception as e:
+        print(f"Error transcribing {scene_path}: {e}")
+        return None
+
+
+def detect_language(video_path):
+    """
+    Detect the language of the first 30 seconds of a video using Whisper
+
+    Args:
+        video_path: Path to the video file
+
+    Returns:
+        Detected language code (e.g., 'en', 'es', 'fr', etc.)
+    """
+    try:
+        print(f"Detecting language from first 30 seconds of {video_path}...")
+        # Extract first 30 seconds of audio for language detection
+        temp_audio_path = os.path.join(
+            OUTPUT_DIR, f"temp_audio_{uuid.uuid4()}.wav")
+
+        # Use ffmpeg to extract first 30 seconds
+        command = [
+            'ffmpeg', '-i', video_path, '-t', '30', '-q:a', '0',
+            '-map', 'a', temp_audio_path, '-y'
+        ]
+        subprocess.run(command, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Load audio using Whisper's utility functions
+        audio = whisper.load_audio(temp_audio_path)
+        audio = whisper.pad_or_trim(audio)
+
+        # Make log-Mel spectrogram
+        mel = whisper.log_mel_spectrogram(
+            audio, n_mels=whisper_model.dims.n_mels).to(whisper_model.device)
+
+        # Detect language directly without transcription
+        _, probs = whisper_model.detect_language(mel)
+        detected_language = max(probs, key=probs.get)
+
+        # Clean up temporary file
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+
+        print(
+            f"Detected language: {detected_language} (probability: {probs[detected_language]:.2%})")
+        return detected_language
+    except Exception as e:
+        print(f"Error detecting language: {e}")
+        return None
+
+
 def process_video(video_id, existing_metadata):
-    """Process a single video - download and split into scenes"""
+    """Process a single video - download, split into scenes, and transcribe"""
     print(f"Processing video: {video_id}")
     result_metadata = []
 
@@ -124,6 +227,10 @@ def process_video(video_id, existing_metadata):
             print(f"Download failed for video ID: {video_id}")
             return []
         print(f"Downloaded video: {video_path}")
+
+        # Detect language from the original video
+        detected_language = detect_language(video_path)
+        print(f"Video {video_id} language detected as: {detected_language}")
 
         # Split into scenes
         try:
@@ -137,21 +244,42 @@ def process_video(video_id, existing_metadata):
         existing_scenes_for_video = [
             item for item in existing_metadata if item['video_id'] == video_id]
 
-        # If we have the same number of scenes, assume it's already processed correctly
-        if existing_scenes_for_video and len(existing_scenes_for_video) == len(scenes):
+        # Only skip processing if we have the same number of scenes AND all scenes have transcripts
+        if (existing_scenes_for_video and
+            len(existing_scenes_for_video) == len(scenes) and
+            all(item.get('transcript_path') and os.path.exists(item['transcript_path'])
+                for item in existing_scenes_for_video)):
             print(
-                f"Metadata for all scenes of {video_id} already exists, using existing")
+                f"Metadata and transcripts for all scenes of {video_id} already exist, using existing")
             return existing_scenes_for_video
+
+        print(f"Need to process transcripts for {video_id}")
 
         # Store metadata
         for scene_idx, scene_path in enumerate(scenes):
-            result_metadata.append({
+            # Transcribe the scene
+            transcript = transcribe_scene(
+                scene_path, video_id, scene_idx, detected_language)
+
+            metadata_entry = {
                 'video_id': video_id,
                 'original_url': f"https://www.youtube.com/watch?v={video_id}",
                 'video_path': video_path,
                 'scene_index': scene_idx,
                 'scene_path': scene_path,
-            })
+            }
+
+            # Add transcript information
+            if transcript:
+                transcript_path = os.path.join(
+                    TRANSCRIPTS_DIR, video_id, f"scene_{scene_idx}.json")
+                metadata_entry['transcript_path'] = transcript_path
+                metadata_entry['transcript_text'] = transcript.get('text', '')
+            else:
+                metadata_entry['transcript_path'] = None
+                metadata_entry['transcript_text'] = ''
+
+            result_metadata.append(metadata_entry)
 
         return result_metadata
     except Exception as e:
@@ -172,25 +300,24 @@ def main():
             existing_metadata = existing_df.to_dict('records')
             print(f"Loaded {len(existing_metadata)} existing metadata records")
 
-            # Create a set of already processed video IDs
-            processed_video_ids = set(item['video_id']
-                                      for item in existing_metadata)
-            print(f"Already processed {len(processed_video_ids)} videos")
+            # Create a set of already processed video IDs with complete processing
+            processed_video_ids = set()
+            for video_id in set(item['video_id'] for item in existing_metadata):
+                # Check if all scenes for this video have transcripts
+                scenes_for_video = [
+                    item for item in existing_metadata if item['video_id'] == video_id]
+                if all(item.get('transcript_path') and os.path.exists(item['transcript_path']) for item in scenes_for_video):
+                    processed_video_ids.add(video_id)
+
+            print(f"Already fully processed {len(processed_video_ids)} videos")
         except Exception as e:
             print(f"Error loading existing metadata: {e}")
             existing_metadata = []
 
-    # Track which videos we've already processed in this run
-    processed_in_this_run = set()
-
-    # Filter out videos that have already been processed
-    for item in existing_metadata:
-        processed_in_this_run.add(item['video_id'])
-
-    videos_to_process = [
-        v for v in video_ids if v not in processed_in_this_run]
+    # Filter out videos that have already been fully processed
+    videos_to_process = [v for v in video_ids if v not in processed_video_ids]
     print(
-        f"Processing {len(videos_to_process)} new videos with {NUM_WORKERS} workers")
+        f"Processing {len(videos_to_process)} videos with {NUM_WORKERS} workers")
 
     # Process videos in parallel
     all_metadata = existing_metadata.copy()

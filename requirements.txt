@@ -1,3 +1,4 @@
 yt-dlp
 scenedetect[opencv]
 pandas
+openai-whisper
