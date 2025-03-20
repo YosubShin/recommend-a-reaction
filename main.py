@@ -5,12 +5,16 @@ import uuid
 import pandas as pd
 import argparse
 import json
+import concurrent.futures
+import threading
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
     description='Download and split YouTube videos into scenes')
 parser.add_argument('--output_dir', type=str, default='./output',
                     help='Output directory for all files')
+parser.add_argument('--workers', type=int, default=1,
+                    help='Number of parallel workers for processing videos')
 args = parser.parse_args()
 
 # Configuration
@@ -21,6 +25,11 @@ SCENES_DIR = os.path.join(OUTPUT_DIR, 'scenes')
 METADATA_CSV = os.path.join(OUTPUT_DIR, 'metadata.csv')
 # Directory for scene info JSON files
 SCENE_INFO_DIR = os.path.join(OUTPUT_DIR, 'scene_info')
+# Number of parallel workers
+NUM_WORKERS = args.workers
+
+# Thread-safe lock for metadata updates
+metadata_lock = threading.Lock()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(VIDEOS_DIR, exist_ok=True)
@@ -103,6 +112,53 @@ def detect_and_split_scenes(video_path, video_id):
     return scenes
 
 
+def process_video(video_id, existing_metadata):
+    """Process a single video - download and split into scenes"""
+    print(f"Processing video: {video_id}")
+    result_metadata = []
+
+    try:
+        # Download the video
+        video_path = download_video(video_id)
+        if not video_path:
+            print(f"Download failed for video ID: {video_id}")
+            return []
+        print(f"Downloaded video: {video_path}")
+
+        # Split into scenes
+        try:
+            scenes = detect_and_split_scenes(video_path, video_id)
+            print(f"Detected {len(scenes)} scenes for {video_id}.")
+        except subprocess.CalledProcessError as e:
+            print(f"Scene detection failed for {video_path}: {e}")
+            return []
+
+        # Check if we already have metadata for this video
+        existing_scenes_for_video = [
+            item for item in existing_metadata if item['video_id'] == video_id]
+
+        # If we have the same number of scenes, assume it's already processed correctly
+        if existing_scenes_for_video and len(existing_scenes_for_video) == len(scenes):
+            print(
+                f"Metadata for all scenes of {video_id} already exists, using existing")
+            return existing_scenes_for_video
+
+        # Store metadata
+        for scene_idx, scene_path in enumerate(scenes):
+            result_metadata.append({
+                'video_id': video_id,
+                'original_url': f"https://www.youtube.com/watch?v={video_id}",
+                'video_path': video_path,
+                'scene_index': scene_idx,
+                'scene_path': scene_path,
+            })
+
+        return result_metadata
+    except Exception as e:
+        print(f"Error processing video {video_id}: {e}")
+        return []
+
+
 def main():
     # Read video IDs from file
     with open(URLS_FILE, 'r') as file:
@@ -124,71 +180,50 @@ def main():
             print(f"Error loading existing metadata: {e}")
             existing_metadata = []
 
-    metadata = existing_metadata.copy()
-
     # Track which videos we've already processed in this run
     processed_in_this_run = set()
 
-    for idx, video_id in enumerate(video_ids):
-        # Skip if this video is already in our metadata and we've processed all its scenes
-        if video_id in processed_in_this_run:
-            print(f"Already processed {video_id} in this run, skipping")
-            continue
+    # Filter out videos that have already been processed
+    for item in existing_metadata:
+        processed_in_this_run.add(item['video_id'])
 
-        print(f"Processing video {idx+1}/{len(video_ids)}: {video_id}")
+    videos_to_process = [
+        v for v in video_ids if v not in processed_in_this_run]
+    print(
+        f"Processing {len(videos_to_process)} new videos with {NUM_WORKERS} workers")
 
-        # Download the video
-        try:
-            video_path = download_video(video_id)
-            if not video_path:
-                print(f"Download failed for video ID: {video_id}")
-                continue
-            print(f"Downloaded video: {video_path}")
-        except Exception as e:
-            print(f"Error downloading video ID {video_id}: {e}")
-            continue
+    # Process videos in parallel
+    all_metadata = existing_metadata.copy()
 
-        # Split into scenes
-        try:
-            scenes = detect_and_split_scenes(video_path, video_id)
-            print(f"Detected {len(scenes)} scenes.")
-        except subprocess.CalledProcessError as e:
-            print(f"Scene detection failed for {video_path}: {e}")
-            continue
+    with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        # Submit all video processing tasks
+        future_to_video = {
+            executor.submit(process_video, video_id, existing_metadata): video_id
+            for video_id in videos_to_process
+        }
 
-        # Check if we already have metadata for this video
-        existing_scenes_for_video = [
-            item for item in existing_metadata if item['video_id'] == video_id]
-
-        # If we have the same number of scenes, assume it's already processed correctly
-        if existing_scenes_for_video and len(existing_scenes_for_video) == len(scenes):
-            print(
-                f"Metadata for all scenes of {video_id} already exists, skipping")
-            processed_in_this_run.add(video_id)
-            continue
-
-        # Remove any existing metadata for this video (we'll replace it)
-        metadata = [item for item in metadata if item['video_id'] != video_id]
-
-        # Store metadata
-        for scene_idx, scene_path in enumerate(scenes):
-            metadata.append({
-                'video_id': video_id,
-                'original_url': f"https://www.youtube.com/watch?v={video_id}",
-                'video_path': video_path,
-                'scene_index': scene_idx,
-                'scene_path': scene_path,
-            })
-
-        processed_in_this_run.add(video_id)
-
-        # Save metadata after each video is processed
-        metadata_df = pd.DataFrame(metadata)
-        metadata_df.to_csv(METADATA_CSV, index=False)
-        print(f"Updated metadata saved to {METADATA_CSV}")
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_video):
+            video_id = future_to_video[future]
+            try:
+                new_metadata = future.result()
+                if new_metadata:
+                    with metadata_lock:
+                        # Remove any existing metadata for this video
+                        all_metadata = [
+                            item for item in all_metadata if item['video_id'] != video_id]
+                        # Add new metadata
+                        all_metadata.extend(new_metadata)
+                        # Save intermediate results
+                        metadata_df = pd.DataFrame(all_metadata)
+                        metadata_df.to_csv(METADATA_CSV, index=False)
+                        print(
+                            f"Updated metadata for {video_id} saved to {METADATA_CSV}")
+            except Exception as e:
+                print(f"Error processing results for {video_id}: {e}")
 
     # Final save of metadata
-    metadata_df = pd.DataFrame(metadata)
+    metadata_df = pd.DataFrame(all_metadata)
     metadata_df.to_csv(METADATA_CSV, index=False)
     print(f"Final metadata saved to {METADATA_CSV}")
 
