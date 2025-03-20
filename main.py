@@ -38,6 +38,8 @@ TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, 'transcripts')
 FACES_DIR = os.path.join(OUTPUT_DIR, 'faces')
 # Directory for face metadata
 FACE_METADATA_DIR = os.path.join(OUTPUT_DIR, 'face_metadata')
+# Directory for consolidated scene data
+CONSOLIDATED_SCENE_DATA_DIR = os.path.join(OUTPUT_DIR, 'scenes')
 # Number of parallel workers
 NUM_WORKERS = args.workers
 
@@ -162,7 +164,20 @@ def detect_faces_in_scene(scene_path, video_id, scene_number):
         print(
             f"Face metadata already exists for {video_id} scene {scene_number}")
         with open(face_metadata_path, 'r') as f:
-            return json.load(f)
+            face_data = json.load(f)
+
+        # Verify that the face files actually exist
+        all_faces_exist = True
+        for face in face_data.get("faces", []):
+            if "face_path" in face and not os.path.exists(face["face_path"]):
+                all_faces_exist = False
+                break
+
+        if all_faces_exist:
+            return face_data
+        else:
+            print(
+                f"Some face images are missing for {video_id} scene {scene_number}, reprocessing...")
 
     print(
         f"Detecting faces in {video_id} scene {scene_number} using PyAV and keyframes...")
@@ -367,6 +382,59 @@ def detect_language(video_path):
         return None
 
 
+def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language):
+    """
+    Create a consolidated JSON file for a scene that includes face metadata and transcript data
+
+    Args:
+        video_id: YouTube video ID
+        scene_path: Path to the scene video file
+        scene_number: Scene number (e.g., "001")
+        face_data: Dictionary with face detection metadata
+        transcript_data: Dictionary with transcript data
+
+    Returns:
+        Path to the consolidated JSON file
+    """
+    # Create the consolidated data structure
+    consolidated_data = {
+        # Scene-level information from face_data
+        "video_id": video_id,
+        "scene_number": scene_number,
+        "scene_path": scene_path,
+        "fps": face_data.get("fps"),
+        "duration": face_data.get("duration"),
+        "total_frames": face_data.get("total_frames"),
+
+        # Include face metadata
+        "face_metadata": {
+            "total_faces_detected": face_data.get("total_faces_detected", 0),
+            "processing_time_seconds": face_data.get("processing_time_seconds"),
+            "faces": face_data.get("faces", [])
+        },
+
+        # Include transcript data
+        "transcript": transcript_data,
+
+        # Include language
+        "language": language
+    }
+
+    # Create the output directory if it doesn't exist
+    scene_dir = os.path.join(SCENES_DIR, video_id)
+    os.makedirs(scene_dir, exist_ok=True)
+
+    # Define the output path
+    json_filename = f"{video_id}-Scene-{scene_number}.json"
+    json_path = os.path.join(scene_dir, json_filename)
+
+    # Save the consolidated data
+    with open(json_path, 'w') as f:
+        json.dump(consolidated_data, f, indent=2)
+
+    return json_path
+
+
 def process_video(video_id, existing_metadata):
     """Process a single video - download, split into scenes, and transcribe"""
     print(f"Processing video: {video_id}")
@@ -380,9 +448,20 @@ def process_video(video_id, existing_metadata):
             return []
         print(f"Downloaded video: {video_path}")
 
-        # Detect language from the original video
-        detected_language = detect_language(video_path)
-        print(f"Video {video_id} language detected as: {detected_language}")
+        # Check if language was previously detected in existing metadata
+        detected_language = None
+        for entry in existing_metadata:
+            if entry['video_id'] == video_id and entry.get('language'):
+                detected_language = entry['language']
+                print(
+                    f"Using previously detected language for {video_id}: {detected_language}")
+                break
+
+        # Only detect language if not found in existing metadata
+        if detected_language is None:
+            detected_language = detect_language(video_path)
+            print(
+                f"Video {video_id} language detected as: {detected_language}")
 
         # Split into scenes
         try:
@@ -392,20 +471,7 @@ def process_video(video_id, existing_metadata):
             print(f"Scene detection failed for {video_path}: {e}")
             return []
 
-        # Check if we already have metadata for this video
-        existing_scenes_for_video = [
-            item for item in existing_metadata if item['video_id'] == video_id]
-
-        # Only skip processing if we have the same number of scenes AND all scenes have transcripts
-        if (existing_scenes_for_video and
-            len(existing_scenes_for_video) == len(scenes) and
-            all(item.get('transcript_path') and os.path.exists(item['transcript_path'])
-                for item in existing_scenes_for_video)):
-            print(
-                f"Metadata and transcripts for all scenes of {video_id} already exist, using existing")
-            return existing_scenes_for_video
-
-        print(f"Need to process transcripts for {video_id}")
+        print(f"Processing scenes for {video_id}")
 
         # Store metadata
         for scene_idx, scene_path in enumerate(scenes):
@@ -422,6 +488,12 @@ def process_video(video_id, existing_metadata):
             face_data = detect_faces_in_scene(
                 scene_path, video_id, scene_number)
 
+            # Create consolidated scene data JSON
+            consolidated_json_path = create_consolidated_scene_data(
+                video_id, scene_path, scene_number, face_data, transcript, detected_language)
+
+            print(f"Created consolidated scene data: {consolidated_json_path}")
+
             metadata_entry = {
                 'video_id': video_id,
                 'original_url': f"https://www.youtube.com/watch?v={video_id}",
@@ -429,6 +501,8 @@ def process_video(video_id, existing_metadata):
                 'scene_index': scene_idx,
                 'scene_number': scene_number,
                 'scene_path': scene_path,
+                'consolidated_data_path': consolidated_json_path,
+                'language': detected_language,
             }
 
             # Add transcript information
@@ -469,23 +543,12 @@ def main():
             existing_df = pd.read_csv(METADATA_CSV)
             existing_metadata = existing_df.to_dict('records')
             print(f"Loaded {len(existing_metadata)} existing metadata records")
-
-            # Create a set of already processed video IDs with complete processing
-            processed_video_ids = set()
-            for video_id in set(item['video_id'] for item in existing_metadata):
-                # Check if all scenes for this video have transcripts
-                scenes_for_video = [
-                    item for item in existing_metadata if item['video_id'] == video_id]
-                if all(item.get('transcript_path') and os.path.exists(item['transcript_path']) for item in scenes_for_video):
-                    processed_video_ids.add(video_id)
-
-            print(f"Already fully processed {len(processed_video_ids)} videos")
         except Exception as e:
             print(f"Error loading existing metadata: {e}")
             existing_metadata = []
 
-    # Filter out videos that have already been fully processed
-    videos_to_process = [v for v in video_ids if v not in processed_video_ids]
+    # Process all videos - individual functions will skip work that's already done
+    videos_to_process = video_ids
     print(
         f"Processing {len(videos_to_process)} videos with {NUM_WORKERS} workers")
 
