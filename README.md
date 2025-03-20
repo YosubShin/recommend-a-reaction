@@ -18,5 +18,5 @@ python download_models.py
 # Commands
 
 ```
-python main.py --output_dir=/home/yosubs/koa_scratch/recommend-a-reaction --workers=2
+python download_and_preprocess.py --output_dir=/home/yosubs/koa_scratch/recommend-a-reaction --workers=2
 ```
