@@ -8,6 +8,12 @@ import json
 import concurrent.futures
 import threading
 import whisper  # For transcription
+import cv2
+from ultralytics import YOLO  # For face detection
+import numpy as np
+from PIL import Image
+import time
+import av  # Add PyAV import
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
@@ -28,6 +34,10 @@ METADATA_CSV = os.path.join(OUTPUT_DIR, 'metadata.csv')
 SCENE_INFO_DIR = os.path.join(OUTPUT_DIR, 'scene_info')
 # Directory for transcriptions
 TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, 'transcripts')
+# Directory for face images
+FACES_DIR = os.path.join(OUTPUT_DIR, 'faces')
+# Directory for face metadata
+FACE_METADATA_DIR = os.path.join(OUTPUT_DIR, 'face_metadata')
 # Number of parallel workers
 NUM_WORKERS = args.workers
 
@@ -39,10 +49,16 @@ os.makedirs(VIDEOS_DIR, exist_ok=True)
 os.makedirs(SCENES_DIR, exist_ok=True)
 os.makedirs(SCENE_INFO_DIR, exist_ok=True)  # Create scene info directory
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)  # Create transcripts directory
+os.makedirs(FACES_DIR, exist_ok=True)  # Create faces directory
+os.makedirs(FACE_METADATA_DIR, exist_ok=True)  # Create face metadata directory
 
 # Load whisper turbo model
 print("Loading Whisper turbo model for transcription...")
 whisper_model = whisper.load_model("turbo")
+
+# Load YOLOv8n-face model
+print("Loading YOLOv8n-face model for face detection...")
+face_model = YOLO('.models/yolov8n-face.pt')
 
 
 def download_video(video_id):
@@ -120,6 +136,137 @@ def detect_and_split_scenes(video_path, video_id):
     return scenes
 
 
+def detect_faces_in_scene(scene_path, video_id, scene_number):
+    """
+    Detect faces in a scene using keyframes and PyAV for faster processing
+
+    Args:
+        scene_path: Path to the scene video file
+        video_id: YouTube video ID
+        scene_number: Scene number (e.g., "001")
+
+    Returns:
+        Dictionary with face detection metadata
+    """
+    # Create directories for this video's faces
+    video_faces_dir = os.path.join(
+        FACES_DIR, video_id, f"Scene-{scene_number}")
+    os.makedirs(video_faces_dir, exist_ok=True)
+
+    # Path for face metadata JSON
+    face_metadata_path = os.path.join(
+        FACE_METADATA_DIR, f"{video_id}-Scene-{scene_number}-faces.json")
+
+    # Check if face metadata already exists
+    if os.path.exists(face_metadata_path):
+        print(
+            f"Face metadata already exists for {video_id} scene {scene_number}")
+        with open(face_metadata_path, 'r') as f:
+            return json.load(f)
+
+    print(
+        f"Detecting faces in {video_id} scene {scene_number} using PyAV and keyframes...")
+
+    face_data = {
+        "video_id": video_id,
+        "scene_number": scene_number,
+        "scene_path": scene_path,
+        "faces": []
+    }
+
+    face_count = 0
+    start_time = time.time()
+
+    try:
+        # Open the video file with PyAV
+        container = av.open(scene_path)
+
+        # Get video stream
+        video_stream = next(s for s in container.streams if s.type == 'video')
+
+        # Set PyAV to skip non-key frames
+        video_stream.codec_context.skip_frame = 'NONKEY'
+
+        # Get video properties
+        fps = float(video_stream.average_rate)
+        duration = float(container.duration) / \
+            1000000.0  # Convert from microseconds
+
+        # Update metadata with video properties
+        face_data.update({
+            "fps": fps,
+            "duration": duration,
+            "total_frames": video_stream.frames,
+        })
+
+        # Process frames
+        for frame in container.decode(video_stream):
+            # Calculate timestamp in seconds
+            timestamp = float(frame.pts * frame.time_base)
+
+            # Convert PyAV frame to numpy array for YOLO
+            img = frame.to_ndarray(format='rgb24')
+
+            # Run face detection
+            results = face_model(img, conf=0.25)
+
+            # Process detected faces
+            for i, detection in enumerate(results[0].boxes.data.tolist()):
+                x1, y1, x2, y2, confidence, _ = detection
+
+                # Convert to integers
+                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+                # Extract face image
+                face_img = img[y1:y2, x1:x2]
+
+                # Skip if face is too small
+                if face_img.size == 0 or face_img.shape[0] < 20 or face_img.shape[1] < 20:
+                    continue
+
+                # Create unique face ID
+                face_id = f"{video_id}_scene{scene_number}_time{timestamp:.2f}_face{i}"
+
+                # Convert RGB to BGR for OpenCV
+                face_img_bgr = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
+
+                # Save face image
+                face_filename = f"{face_id}.jpg"
+                face_path = os.path.join(video_faces_dir, face_filename)
+                cv2.imwrite(face_path, face_img_bgr)
+
+                # Add face metadata
+                face_data["faces"].append({
+                    "face_id": face_id,
+                    "timestamp": timestamp,
+                    "bbox": [x1, y1, x2, y2],
+                    "confidence": confidence,
+                    "face_path": face_path
+                })
+
+                face_count += 1
+
+    except Exception as e:
+        print(f"Error detecting faces in {scene_path}: {e}")
+        face_data["error"] = str(e)
+
+    finally:
+        # Calculate processing time
+        processing_time = time.time() - start_time
+
+        # Add summary information
+        face_data["total_faces_detected"] = face_count
+        face_data["processing_time_seconds"] = processing_time
+
+        # Save face metadata to JSON
+        with open(face_metadata_path, 'w') as f:
+            json.dump(face_data, f, indent=2)
+
+    print(
+        f"Detected {face_count} faces in {video_id} scene {scene_number} in {processing_time:.2f} seconds")
+    return face_data
+
+
 def transcribe_scene(scene_path, video_id, scene_idx, language=None):
     """
     Transcribe a single scene using Whisper
@@ -135,18 +282,23 @@ def transcribe_scene(scene_path, video_id, scene_idx, language=None):
     video_transcript_dir = os.path.join(TRANSCRIPTS_DIR, video_id)
     os.makedirs(video_transcript_dir, exist_ok=True)
 
-    # Define output path for transcript
-    transcript_filename = f"scene_{scene_idx}.json"
+    # Extract scene number from the scene filename
+    scene_filename = os.path.basename(scene_path)
+    # Extract the Scene-XXX part from the filename
+    scene_number = scene_filename.split('-Scene-')[1].split('.')[0]
+
+    # Define output path for transcript using the same numbering as the scene file
+    transcript_filename = f"{video_id}-Scene-{scene_number}.json"
     transcript_path = os.path.join(video_transcript_dir, transcript_filename)
 
     # Check if transcript already exists
     if os.path.exists(transcript_path):
-        print(f"Transcript already exists for {video_id} scene {scene_idx}")
+        print(f"Transcript already exists for {video_id} scene {scene_number}")
         with open(transcript_path, 'r') as f:
             return json.load(f)
 
     try:
-        print(f"Transcribing {video_id} scene {scene_idx}...")
+        print(f"Transcribing {video_id} scene {scene_number}...")
 
         # If language is specified, use it; otherwise let Whisper auto-detect
         if language:
@@ -257,27 +409,45 @@ def process_video(video_id, existing_metadata):
 
         # Store metadata
         for scene_idx, scene_path in enumerate(scenes):
+            # Extract scene number from the scene filename
+            scene_filename = os.path.basename(scene_path)
+            # Extract the Scene-XXX part from the filename
+            scene_number = scene_filename.split('-Scene-')[1].split('.')[0]
+
             # Transcribe the scene
             transcript = transcribe_scene(
                 scene_path, video_id, scene_idx, detected_language)
+
+            # Detect faces in the scene
+            face_data = detect_faces_in_scene(
+                scene_path, video_id, scene_number)
 
             metadata_entry = {
                 'video_id': video_id,
                 'original_url': f"https://www.youtube.com/watch?v={video_id}",
                 'video_path': video_path,
                 'scene_index': scene_idx,
+                'scene_number': scene_number,
                 'scene_path': scene_path,
             }
 
             # Add transcript information
             if transcript:
+                transcript_filename = f"{video_id}-Scene-{scene_number}.json"
                 transcript_path = os.path.join(
-                    TRANSCRIPTS_DIR, video_id, f"scene_{scene_idx}.json")
+                    TRANSCRIPTS_DIR, video_id, transcript_filename)
                 metadata_entry['transcript_path'] = transcript_path
                 metadata_entry['transcript_text'] = transcript.get('text', '')
             else:
                 metadata_entry['transcript_path'] = None
                 metadata_entry['transcript_text'] = ''
+
+            # Add face detection information
+            face_metadata_path = os.path.join(
+                FACE_METADATA_DIR, f"{video_id}-Scene-{scene_number}-faces.json")
+            metadata_entry['face_metadata_path'] = face_metadata_path
+            metadata_entry['face_count'] = face_data.get(
+                'total_faces_detected', 0)
 
             result_metadata.append(metadata_entry)
 

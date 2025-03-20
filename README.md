@@ -1,10 +1,18 @@
 # Prerequisites
 
+## Install ffmpeg
+
 ```
 ffmpeg
 
 On Koa:
 module load vis/FFmpeg
+```
+
+## Download models
+
+```
+python download_models.py
 ```
 
 # Commands
