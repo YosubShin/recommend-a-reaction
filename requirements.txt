@@ -5,3 +5,5 @@ openai-whisper
 ultralytics
 deepface
 av
+tf-keras
+python-speech-features

@@ -1,3 +1,4 @@
+from lightasd.LightASD import setup as light_asd_setup
 import os
 import yt_dlp
 import subprocess
@@ -14,6 +15,12 @@ import numpy as np
 from PIL import Image
 import time
 import av  # Add PyAV import
+import torch
+import tqdm
+from scipy import signal
+from scipy.interpolate import interp1d
+from scipy.io import wavfile
+import python_speech_features
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
@@ -22,9 +29,12 @@ parser.add_argument('--output_dir', type=str, default='./output',
                     help='Output directory for all files')
 parser.add_argument('--workers', type=int, default=1,
                     help='Number of parallel workers for processing videos')
+parser.add_argument('--face_detection_fps', type=int, default=5,
+                    help='FPS for face detection (higher values are more accurate but slower)')
 args = parser.parse_args()
 
 # Configuration
+DEVICE = 'cpu'
 URLS_FILE = 'video_ids.txt'
 OUTPUT_DIR = args.output_dir
 VIDEOS_DIR = os.path.join(OUTPUT_DIR, 'videos')
@@ -36,12 +46,21 @@ SCENE_INFO_DIR = os.path.join(OUTPUT_DIR, 'scene_info')
 TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, 'transcripts')
 # Directory for face images
 FACES_DIR = os.path.join(OUTPUT_DIR, 'faces')
-# Directory for face metadata
-FACE_METADATA_DIR = os.path.join(OUTPUT_DIR, 'face_metadata')
 # Directory for consolidated scene data
 CONSOLIDATED_SCENE_DATA_DIR = os.path.join(OUTPUT_DIR, 'scenes')
+# Directory for ASD data
+ASD_DIR = os.path.join(OUTPUT_DIR, 'asd')
 # Number of parallel workers
 NUM_WORKERS = args.workers
+
+# ASD parameters - hardcoded global variables instead of command line arguments
+FACE_DETECTION_FPS = args.face_detection_fps
+DATA_LOADER_THREAD = 10
+FACE_DETECTION_SCALE = 0.25
+MIN_TRACK_LENGTH = 10  # Number of min frames for each shot
+NUM_FAILED_DET = 10  # Number of missed detections allowed before tracking is stopped
+MIN_FACE_SIZE = 1  # Minimum face size in pixels
+CROP_SCALE = 0.40  # Scale bounding box
 
 # Thread-safe lock for metadata updates
 metadata_lock = threading.Lock()
@@ -52,7 +71,7 @@ os.makedirs(SCENES_DIR, exist_ok=True)
 os.makedirs(SCENE_INFO_DIR, exist_ok=True)  # Create scene info directory
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)  # Create transcripts directory
 os.makedirs(FACES_DIR, exist_ok=True)  # Create faces directory
-os.makedirs(FACE_METADATA_DIR, exist_ok=True)  # Create face metadata directory
+os.makedirs(ASD_DIR, exist_ok=True)  # Create ASD directory
 
 # Load whisper turbo model
 print("Loading Whisper turbo model for transcription...")
@@ -61,6 +80,503 @@ whisper_model = whisper.load_model("turbo")
 # Load YOLOv8n-face model
 print("Loading YOLOv8n-face model for face detection...")
 face_model = YOLO('.models/yolov8n-face.pt')
+
+# Load ASD model (Light-ASD)
+print("Loading Light-ASD model for active speaker detection...")
+light_asd = light_asd_setup(device=DEVICE)
+
+# ASD helper functions
+
+
+def convert_numpy_to_lists(obj):
+    if isinstance(obj, dict):
+        return {k: convert_numpy_to_lists(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_to_lists(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    else:
+        return obj
+
+
+def bb_intersection_over_union(boxA, boxB, evalCol=False):
+    """Calculate intersection over union between two bounding boxes"""
+    # CPU: IOU Function to calculate overlap between two image
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    if evalCol == True:
+        iou = interArea / float(boxAArea)
+    else:
+        iou = interArea / float(boxAArea + boxBArea - interArea)
+    return iou
+
+
+def track_shot(sceneFaces):
+    """Track faces across frames in a scene"""
+    # CPU: Face tracking
+    iouThres = 0.5     # Minimum IOU between consecutive face detections
+    tracks = []
+    while True:
+        track = []
+        for frameFaces in sceneFaces:
+            for face in frameFaces:
+                if track == []:
+                    track.append(face)
+                    frameFaces.remove(face)
+                elif face['frame'] - track[-1]['frame'] <= NUM_FAILED_DET:
+                    iou = bb_intersection_over_union(
+                        face['bbox'], track[-1]['bbox'])
+                    if iou > iouThres:
+                        track.append(face)
+                        frameFaces.remove(face)
+                        continue
+                else:
+                    break
+        if track == []:
+            break
+        elif len(track) > MIN_TRACK_LENGTH:
+            frameNum = np.array([f['frame'] for f in track])
+            bboxes = np.array([np.array(f['bbox']) for f in track])
+            frameI = np.arange(frameNum[0], frameNum[-1]+1)
+            bboxesI = []
+            for ij in range(0, 4):
+                interpfn = interp1d(frameNum, bboxes[:, ij])
+                bboxesI.append(interpfn(frameI))
+            bboxesI = np.stack(bboxesI, axis=1)
+            if max(np.mean(bboxesI[:, 2]-bboxesI[:, 0]), np.mean(bboxesI[:, 3]-bboxesI[:, 1])) > MIN_FACE_SIZE:
+                tracks.append({'frame': frameI, 'bbox': bboxesI})
+    return tracks
+
+
+def crop_video_from_frames(track, cropFile, frames, audio_file_path, start_frame=0):
+    """Crop face tracks from video frames and extract corresponding audio"""
+    # CPU: crop the face clips
+    os.makedirs(os.path.dirname(cropFile), exist_ok=True)
+
+    vOut = cv2.VideoWriter(
+        cropFile + 't.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 25, (224, 224))  # Write video
+    dets = {'x': [], 'y': [], 's': []}
+    for det in track['bbox']:  # Read the tracks
+        dets['s'].append(max((det[3]-det[1]), (det[2]-det[0]))/2)
+        dets['y'].append((det[1]+det[3])/2)  # crop center x
+        dets['x'].append((det[0]+det[2])/2)  # crop center y
+    dets['s'] = signal.medfilt(dets['s'], kernel_size=13)  # Smooth detections
+    dets['x'] = signal.medfilt(dets['x'], kernel_size=13)
+    dets['y'] = signal.medfilt(dets['y'], kernel_size=13)
+
+    for fidx, frame_idx in enumerate(track['frame']):
+        cs = CROP_SCALE  # Crop scale
+        bs = dets['s'][fidx]   # Detection box size
+        bsi = int(bs * (1 + 2 * cs))  # Pad videos by this amount
+
+        # Get the frame
+        if frame_idx < len(frames):
+            image = frames[int(frame_idx)]
+        else:
+            print(
+                f"Warning: Frame index {frame_idx} out of bounds ({len(frames)} frames available)")
+            continue
+
+        frame = np.pad(image, ((bsi, bsi), (bsi, bsi), (0, 0)),
+                       'constant', constant_values=(110, 110))
+        my = dets['y'][fidx] + bsi  # BBox center Y
+        mx = dets['x'][fidx] + bsi  # BBox center X
+
+        # Ensure coordinates are valid
+        y_start = max(0, int(my-bs))
+        y_end = min(frame.shape[0], int(my+bs*(1+2*cs)))
+        x_start = max(0, int(mx-bs*(1+cs)))
+        x_end = min(frame.shape[1], int(mx+bs*(1+cs)))
+
+        if y_end <= y_start or x_end <= x_start:
+            print(
+                f"Warning: Invalid crop dimensions: {y_start}:{y_end}, {x_start}:{x_end}")
+            continue
+
+        face = frame[y_start:y_end, x_start:x_end]
+
+        # Ensure face is not empty
+        if face.size == 0:
+            print(f"Warning: Empty face crop at frame {frame_idx}")
+            continue
+
+        try:
+            resized_face = cv2.resize(face, (224, 224))
+            vOut.write(resized_face)
+        except Exception as e:
+            print(f"Error resizing/writing face: {e}")
+            continue
+
+    vOut.release()
+
+    # Extract audio segment corresponding to the face track
+    audioTmp = cropFile + '.wav'
+    audioStart = (track['frame'][0]) / 25
+    audioEnd = (track['frame'][-1]+1) / 25
+
+    command = (f"ffmpeg -y -i {audio_file_path} -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 "
+               f"-threads {DATA_LOADER_THREAD} -ss {audioStart:.3f} -to {audioEnd:.3f} {audioTmp} -loglevel panic")
+
+    try:
+        output = subprocess.call(
+            command, shell=True, stdout=None)  # Crop audio file
+
+        # Combine audio and video
+        command = (f"ffmpeg -y -i {cropFile}t.mp4 -i {audioTmp} -threads {DATA_LOADER_THREAD} "
+                   f"-c:v copy -c:a aac {cropFile}.mp4 -loglevel panic")
+        output = subprocess.call(command, shell=True, stdout=None)
+
+        # Clean up temporary files
+        if os.path.exists(cropFile + 't.mp4'):
+            os.remove(cropFile + 't.mp4')
+
+        return convert_numpy_to_lists({'track': track, 'proc_track': dets, 'crop_file': cropFile + '.mp4', 'audio_file': audioTmp})
+    except Exception as e:
+        print(f"Error processing audio/video for face track: {e}")
+        return None
+
+
+def evaluate_light_asd_simplified(audioFeature, videoFeature, device):
+    """Run active speaker detection on a single face track"""
+    # Calculate usable length
+    length = min(
+        (audioFeature.shape[0] - audioFeature.shape[0] % 4) / 100, videoFeature.shape[0] / 25)
+
+    # Prepare features
+    audioFeature = audioFeature[:int(round(length * 100)), :]
+    videoFeature = videoFeature[:int(round(length * 25)), :, :]
+
+    # Process entire sequence at once
+    with torch.no_grad():
+        inputA = torch.FloatTensor(audioFeature).unsqueeze(0).to(device)
+        inputV = torch.FloatTensor(videoFeature).unsqueeze(0).to(device)
+
+        # Forward pass
+        audioEmbed = light_asd.model.forward_audio_frontend(inputA)
+        visualEmbed = light_asd.model.forward_visual_frontend(inputV)
+        outsAV = light_asd.model.forward_audio_visual_backend(
+            audioEmbed, visualEmbed)
+
+        # Get prediction scores
+        scores = light_asd.lossAV.forward(outsAV, labels=None)
+
+    # Round scores to one decimal place
+    scores = np.round(np.array(scores), 1).astype(float)
+    return scores
+
+
+def evaluate_network(files, device):
+    """Run active speaker detection on multiple face tracks"""
+    # GPU: active speaker detection by pretrained model
+    allScores = []
+    for file in tqdm.tqdm(files, total=len(files)):
+        fileName = os.path.splitext(file.split(
+            '/')[-1])[0]  # Load audio and video
+        audio_file = os.path.join(os.path.dirname(file), fileName + '.wav')
+
+        try:
+            _, audio = wavfile.read(audio_file)
+            audioFeature = python_speech_features.mfcc(
+                audio, 16000, numcep=13, winlen=0.025, winstep=0.010)
+
+            video = cv2.VideoCapture(file)
+            videoFeature = []
+            while video.isOpened():
+                ret, frames = video.read()
+                if ret == True:
+                    face = cv2.cvtColor(frames, cv2.COLOR_BGR2GRAY)
+                    face = cv2.resize(face, (224, 224))
+                    face = face[int(112-(112/2)):int(112+(112/2)),
+                                int(112-(112/2)):int(112+(112/2))]
+                    videoFeature.append(face)
+                else:
+                    break
+            video.release()
+
+            if len(videoFeature) == 0:
+                print(f"Warning: No frames extracted from {file}")
+                allScores.append(np.array([]))
+                continue
+
+            videoFeature = np.array(videoFeature)
+
+            # Run ASD
+            allScore = evaluate_light_asd_simplified(
+                audioFeature, videoFeature, device)
+            allScores.append(allScore)
+        except Exception as e:
+            print(f"Error processing file {file}: {e}")
+            allScores.append(np.array([]))
+
+    return allScores
+
+
+def detect_faces_in_scene(scene_path, video_id, scene_number, fps=FACE_DETECTION_FPS):
+    """
+    Detect faces in a scene at specified FPS
+
+    Args:
+        scene_path: Path to the scene video file
+        video_id: YouTube video ID
+        scene_number: Scene number (e.g., "001")
+        fps: Target FPS for face detection (default: FACE_DETECTION_FPS)
+
+    Returns:
+        Dictionary with face detection metadata
+    """
+    # Create directories for this video's faces
+    video_faces_dir = os.path.join(
+        FACES_DIR, video_id, f"Scene-{scene_number}")
+    os.makedirs(video_faces_dir, exist_ok=True)
+
+    # Path for face metadata JSON
+    face_metadata_path = os.path.join(
+        FACES_DIR, video_id, f"Scene-{scene_number}.json")
+
+    # Check if face metadata already exists
+    if os.path.exists(face_metadata_path):
+        print(
+            f"Face metadata already exists for {video_id} scene {scene_number}")
+        with open(face_metadata_path, 'r') as f:
+            face_data = json.load(f)
+
+        # Verify that the face files actually exist
+        all_faces_exist = True
+        for face in face_data.get("faces", []):
+            if "face_path" in face and not os.path.exists(face["face_path"]):
+                all_faces_exist = False
+                break
+
+        if all_faces_exist:
+            return face_data
+        else:
+            print(
+                f"Some face images are missing for {video_id} scene {scene_number}, reprocessing...")
+
+    print(
+        f"Detecting faces in {video_id} scene {scene_number} at {fps} FPS...")
+
+    face_data = {
+        "video_id": video_id,
+        "scene_number": scene_number,
+        "scene_path": scene_path,
+        "faces": [],
+    }
+
+    face_count = 0
+    start_time = time.time()
+
+    try:
+        # Open the video file with PyAV
+        container = av.open(scene_path)
+
+        # Get video stream
+        video_stream = next(s for s in container.streams if s.type == 'video')
+
+        # Get video properties
+        video_fps = float(video_stream.average_rate)
+        duration = float(container.duration) / \
+            1000000.0  # Convert from microseconds
+        total_frames = video_stream.frames
+
+        # Update metadata with video properties
+        face_data.update({
+            "fps": video_fps,
+            "duration": duration,
+            "total_frames": total_frames,
+        })
+
+        # Calculate frame sampling rate
+        sample_rate = max(1, int(video_fps / fps))
+        face_data["face_detection_fps"] = fps
+        face_data["sample_rate"] = sample_rate
+
+        # Process frames
+        frame_idx = 0
+        frame_faces_list = []
+
+        for frame in container.decode(video_stream):
+            # Skip frames based on sample rate
+            if frame_idx % sample_rate != 0:
+                frame_idx += 1
+                continue
+
+            # Calculate timestamp in seconds
+            timestamp = float(frame.pts * frame.time_base)
+
+            # Convert PyAV frame to numpy array for YOLO
+            img = frame.to_ndarray(format='rgb24')
+
+            # Run face detection
+            results = face_model(img, conf=0.25)
+
+            frame_faces = []
+            # Process detected faces
+            for i, detection in enumerate(results[0].boxes.data.tolist()):
+                x1, y1, x2, y2, confidence, _ = detection
+
+                # Convert to integers
+                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+                # Extract face image
+                face_img = img[y1:y2, x1:x2]
+
+                # Skip if face is too small
+                if face_img.size == 0 or face_img.shape[0] < 20 or face_img.shape[1] < 20:
+                    continue
+
+                # Create unique face ID for filename
+                face_filename = f"{video_id}_scene{scene_number}_time{timestamp:.2f}_face{i}.jpg"
+                face_path = os.path.join(video_faces_dir, face_filename)
+
+                # Convert RGB to BGR for OpenCV
+                face_img_bgr = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
+
+                # Save face image
+                cv2.imwrite(face_path, face_img_bgr)
+
+                # Add face metadata
+                frame_faces.append({
+                    "frame": frame_idx,
+                    "timestamp": timestamp,
+                    "bbox": [x1, y1, x2, y2],
+                    "conf": confidence,
+                    "face_path": face_path
+                })
+
+                face_count += 1
+
+            frame_faces_list.append(frame_faces)
+            frame_idx += 1
+    except Exception as e:
+        print(f"Error detecting faces in {scene_path}: {e}")
+        face_data["error"] = str(e)
+
+    finally:
+        # Calculate processing time
+        processing_time = time.time() - start_time
+
+        # Add summary information
+        face_data["total_faces_detected"] = face_count
+        face_data["processing_time_seconds"] = processing_time
+        face_data["faces"] = frame_faces_list
+
+        # Save face metadata to JSON
+        with open(face_metadata_path, 'w') as f:
+            json.dump(face_data, f, indent=2)
+
+    print(
+        f"Detected {face_count} faces in {video_id} scene {scene_number} in {processing_time:.2f} seconds")
+    return face_data
+
+
+def process_asd(scene_path, video_id, scene_number, face_detection_results, device=DEVICE):
+    """
+    Process active speaker detection for a scene
+
+    Args:
+        scene_path: Path to the scene video file
+        video_id: YouTube video ID
+        scene_number: Scene number (e.g., "001")
+        light_asd: TalkNet model instance
+
+    Returns:
+        Dictionary with ASD results
+    """
+    print(f"Processing ASD for {video_id} scene {scene_number}...")
+
+    # Create output directories
+    scene_asd_dir = os.path.join(ASD_DIR, video_id, f"Scene-{scene_number}")
+    scene_crops_dir = os.path.join(
+        scene_asd_dir, "crops")
+    os.makedirs(scene_asd_dir, exist_ok=True)
+    os.makedirs(scene_crops_dir, exist_ok=True)
+
+    # Path for ASD results
+    asd_results_path = os.path.join(
+        ASD_DIR, video_id, f"Scene-{scene_number}.json")
+
+    # Check if ASD results already exist
+    if os.path.exists(asd_results_path):
+        print(f"ASD results already exist for {video_id} scene {scene_number}")
+        with open(asd_results_path, 'r') as f:
+            return json.load(f)
+
+    # Step 1: Get face detection results
+    if not face_detection_results:
+        print(f"Face detection failed for {video_id} scene {scene_number}")
+        return None
+
+    # Step 2: Load all frames for face tracking and cropping
+    cap = cv2.VideoCapture(scene_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open video {scene_path}")
+        return None
+
+    # Load all frames if the video is short enough
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+
+    cap.release()
+
+    # Step 3: Get face detections from the results
+    face_detections = face_detection_results["faces"]
+
+    # Step 4: Track faces across frames
+    print(f"Tracking faces in {video_id} scene {scene_number}...")
+    face_tracks = track_shot(face_detections)
+    print(f"Found {len(face_tracks)} face tracks")
+
+    # Step 5: Crop face tracks and extract audio
+    print(f"Cropping face tracks in {video_id} scene {scene_number}...")
+    video_tracks = []
+    for i, track in enumerate(face_tracks):
+        crop_file = os.path.join(scene_crops_dir, f"{i:05d}")
+        track_result = crop_video_from_frames(
+            track, crop_file, frames, scene_path)
+        if track_result:
+            video_tracks.append(track_result)
+
+    # Step 6: Run ASD on face tracks
+    print(f"Running ASD on {len(video_tracks)} face tracks...")
+    crop_files = [track["crop_file"]
+                  for track in video_tracks if "crop_file" in track]
+    asd_scores = evaluate_network(crop_files, device)
+
+    # Add ASD scores to track results
+    for i, (track, scores) in enumerate(zip(video_tracks, asd_scores)):
+        if len(scores) > 0:
+            track["asd_scores"] = scores.tolist()
+
+    # Save ASD results
+    asd_results = {
+        "video_id": video_id,
+        "scene_number": scene_number,
+        "scene_path": scene_path,
+        "face_tracks": len(video_tracks),
+        "tracks": video_tracks
+    }
+
+    with open(asd_results_path, 'w') as f:
+        print(asd_results)
+        print("dumping asd_results to file")
+        json.dump(asd_results, f, indent=2)
+        print("done dumping")
+
+    return asd_results
 
 
 def download_video(video_id):
@@ -136,150 +652,6 @@ def detect_and_split_scenes(video_path, video_id):
         json.dump(scene_info, f, indent=2)
 
     return scenes
-
-
-def detect_faces_in_scene(scene_path, video_id, scene_number):
-    """
-    Detect faces in a scene using keyframes and PyAV for faster processing
-
-    Args:
-        scene_path: Path to the scene video file
-        video_id: YouTube video ID
-        scene_number: Scene number (e.g., "001")
-
-    Returns:
-        Dictionary with face detection metadata
-    """
-    # Create directories for this video's faces
-    video_faces_dir = os.path.join(
-        FACES_DIR, video_id, f"Scene-{scene_number}")
-    os.makedirs(video_faces_dir, exist_ok=True)
-
-    # Path for face metadata JSON
-    face_metadata_path = os.path.join(
-        FACE_METADATA_DIR, f"{video_id}-Scene-{scene_number}-faces.json")
-
-    # Check if face metadata already exists
-    if os.path.exists(face_metadata_path):
-        print(
-            f"Face metadata already exists for {video_id} scene {scene_number}")
-        with open(face_metadata_path, 'r') as f:
-            face_data = json.load(f)
-
-        # Verify that the face files actually exist
-        all_faces_exist = True
-        for face in face_data.get("faces", []):
-            if "face_path" in face and not os.path.exists(face["face_path"]):
-                all_faces_exist = False
-                break
-
-        if all_faces_exist:
-            return face_data
-        else:
-            print(
-                f"Some face images are missing for {video_id} scene {scene_number}, reprocessing...")
-
-    print(
-        f"Detecting faces in {video_id} scene {scene_number} using PyAV and keyframes...")
-
-    face_data = {
-        "video_id": video_id,
-        "scene_number": scene_number,
-        "scene_path": scene_path,
-        "faces": []
-    }
-
-    face_count = 0
-    start_time = time.time()
-
-    try:
-        # Open the video file with PyAV
-        container = av.open(scene_path)
-
-        # Get video stream
-        video_stream = next(s for s in container.streams if s.type == 'video')
-
-        # Set PyAV to skip non-key frames
-        video_stream.codec_context.skip_frame = 'NONKEY'
-
-        # Get video properties
-        fps = float(video_stream.average_rate)
-        duration = float(container.duration) / \
-            1000000.0  # Convert from microseconds
-
-        # Update metadata with video properties
-        face_data.update({
-            "fps": fps,
-            "duration": duration,
-            "total_frames": video_stream.frames,
-        })
-
-        # Process frames
-        for frame in container.decode(video_stream):
-            # Calculate timestamp in seconds
-            timestamp = float(frame.pts * frame.time_base)
-
-            # Convert PyAV frame to numpy array for YOLO
-            img = frame.to_ndarray(format='rgb24')
-
-            # Run face detection
-            results = face_model(img, conf=0.25)
-
-            # Process detected faces
-            for i, detection in enumerate(results[0].boxes.data.tolist()):
-                x1, y1, x2, y2, confidence, _ = detection
-
-                # Convert to integers
-                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-
-                # Extract face image
-                face_img = img[y1:y2, x1:x2]
-
-                # Skip if face is too small
-                if face_img.size == 0 or face_img.shape[0] < 20 or face_img.shape[1] < 20:
-                    continue
-
-                # Create unique face ID
-                face_id = f"{video_id}_scene{scene_number}_time{timestamp:.2f}_face{i}"
-
-                # Convert RGB to BGR for OpenCV
-                face_img_bgr = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
-
-                # Save face image
-                face_filename = f"{face_id}.jpg"
-                face_path = os.path.join(video_faces_dir, face_filename)
-                cv2.imwrite(face_path, face_img_bgr)
-
-                # Add face metadata
-                face_data["faces"].append({
-                    "face_id": face_id,
-                    "timestamp": timestamp,
-                    "bbox": [x1, y1, x2, y2],
-                    "confidence": confidence,
-                    "face_path": face_path
-                })
-
-                face_count += 1
-
-    except Exception as e:
-        print(f"Error detecting faces in {scene_path}: {e}")
-        face_data["error"] = str(e)
-
-    finally:
-        # Calculate processing time
-        processing_time = time.time() - start_time
-
-        # Add summary information
-        face_data["total_faces_detected"] = face_count
-        face_data["processing_time_seconds"] = processing_time
-
-        # Save face metadata to JSON
-        with open(face_metadata_path, 'w') as f:
-            json.dump(face_data, f, indent=2)
-
-    print(
-        f"Detected {face_count} faces in {video_id} scene {scene_number} in {processing_time:.2f} seconds")
-    return face_data
 
 
 def transcribe_scene(scene_path, video_id, scene_idx, language=None):
@@ -382,9 +754,9 @@ def detect_language(video_path):
         return None
 
 
-def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language):
+def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language, asd_data=None):
     """
-    Create a consolidated JSON file for a scene that includes face metadata and transcript data
+    Create a consolidated JSON file for a scene that includes face metadata,
 
     Args:
         video_id: YouTube video ID
@@ -392,6 +764,8 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
         scene_number: Scene number (e.g., "001")
         face_data: Dictionary with face detection metadata
         transcript_data: Dictionary with transcript data
+        language: Detected language for the scene
+        asd_data: Dictionary with ASD results
 
     Returns:
         Path to the consolidated JSON file
@@ -419,6 +793,10 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
         # Include language
         "language": language
     }
+
+    # Add ASD data if it exists
+    if asd_data:
+        consolidated_data["asd_data"] = asd_data
 
     # Create the output directory if it doesn't exist
     scene_dir = os.path.join(SCENES_DIR, video_id)
@@ -488,9 +866,13 @@ def process_video(video_id, existing_metadata):
             face_data = detect_faces_in_scene(
                 scene_path, video_id, scene_number)
 
+            # Process ASD for the scene
+            asd_data = process_asd(scene_path, video_id,
+                                   scene_number, face_data)
+
             # Create consolidated scene data JSON
             consolidated_json_path = create_consolidated_scene_data(
-                video_id, scene_path, scene_number, face_data, transcript, detected_language)
+                video_id, scene_path, scene_number, face_data, transcript, detected_language, asd_data)
 
             print(f"Created consolidated scene data: {consolidated_json_path}")
 
@@ -518,10 +900,18 @@ def process_video(video_id, existing_metadata):
 
             # Add face detection information
             face_metadata_path = os.path.join(
-                FACE_METADATA_DIR, f"{video_id}-Scene-{scene_number}-faces.json")
+                FACES_DIR, video_id, f"Scene-{scene_number}.json")
             metadata_entry['face_metadata_path'] = face_metadata_path
             metadata_entry['face_count'] = face_data.get(
                 'total_faces_detected', 0)
+
+            # Add ASD information
+            if asd_data:
+                asd_results_path = os.path.join(
+                    ASD_DIR, video_id, f"Scene-{scene_number}.json")
+                metadata_entry['asd_results_path'] = asd_results_path
+                metadata_entry['asd_face_tracks'] = asd_data.get(
+                    'face_tracks', 0)
 
             result_metadata.append(metadata_entry)
 
