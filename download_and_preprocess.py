@@ -417,7 +417,7 @@ def detect_faces_in_scene(scene_path, video_id, scene_number, fps=FACE_DETECTION
             img = frame.to_ndarray(format='rgb24')
 
             # Run face detection
-            results = face_model(img, conf=0.25)
+            results = face_model(img, conf=0.25, verbose=False)
 
             frame_faces = []
             # Process detected faces
@@ -571,10 +571,7 @@ def process_asd(scene_path, video_id, scene_number, face_detection_results, devi
     }
 
     with open(asd_results_path, 'w') as f:
-        print(asd_results)
-        print("dumping asd_results to file")
         json.dump(asd_results, f, indent=2)
-        print("done dumping")
 
     return asd_results
 
