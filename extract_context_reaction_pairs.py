@@ -229,6 +229,34 @@ def find_context_reaction_pairs(output_dir):
                     "reaction_duration": reaction_scene.get("duration", 0)
                 }
 
+                # If it's a context-reaction pair, extract middle frames
+                if is_pair:
+                    # Get middle frame for context scene
+                    context_frames = context_scene.get(
+                        "frame_metadata", {}).get("frames", [])
+                    if context_frames:
+                        middle_idx = len(context_frames) // 2
+                        context_middle_frame = context_frames[middle_idx].get(
+                            "masked_frame_path", "")
+                        result["context_middle_frame"] = context_middle_frame
+                    else:
+                        result["context_middle_frame"] = ""
+
+                    # Get middle frame for reaction scene
+                    reaction_frames = reaction_scene.get(
+                        "frame_metadata", {}).get("frames", [])
+                    if reaction_frames:
+                        middle_idx = len(reaction_frames) // 2
+                        reaction_middle_frame = reaction_frames[middle_idx].get(
+                            "masked_frame_path", "")
+                        result["reaction_middle_frame"] = reaction_middle_frame
+                    else:
+                        result["reaction_middle_frame"] = ""
+                else:
+                    # If not a context-reaction pair, add empty values
+                    result["context_middle_frame"] = ""
+                    result["reaction_middle_frame"] = ""
+
                 results.append(result)
 
             except Exception as e:
