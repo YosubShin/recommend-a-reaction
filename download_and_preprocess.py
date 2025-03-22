@@ -50,6 +50,8 @@ FACES_DIR = os.path.join(OUTPUT_DIR, 'faces')
 CONSOLIDATED_SCENE_DATA_DIR = os.path.join(OUTPUT_DIR, 'scenes')
 # Directory for ASD data
 ASD_DIR = os.path.join(OUTPUT_DIR, 'asd')
+# Directory for extracted frames
+FRAMES_DIR = os.path.join(OUTPUT_DIR, 'frames')
 # Number of parallel workers
 NUM_WORKERS = args.workers
 
@@ -72,6 +74,7 @@ os.makedirs(SCENE_INFO_DIR, exist_ok=True)  # Create scene info directory
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)  # Create transcripts directory
 os.makedirs(FACES_DIR, exist_ok=True)  # Create faces directory
 os.makedirs(ASD_DIR, exist_ok=True)  # Create ASD directory
+os.makedirs(FRAMES_DIR, exist_ok=True)  # Create frames directory
 
 # Load whisper turbo model
 print("Loading Whisper turbo model for transcription...")
@@ -751,7 +754,139 @@ def detect_language(video_path):
         return None
 
 
-def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language, asd_data=None):
+def extract_frames(scene_path, video_id, scene_number):
+    """
+    Extract keyframes from a scene
+
+    Args:
+        scene_path: Path to the scene video file
+        video_id: YouTube video ID
+        scene_number: Scene number (e.g., "001")
+
+    Returns:
+        Dictionary with frame extraction metadata
+    """
+    # Create directories for this video's frames
+    video_frames_dir = os.path.join(
+        FRAMES_DIR, video_id, f"Scene-{scene_number}")
+    os.makedirs(video_frames_dir, exist_ok=True)
+
+    # Path for frame metadata JSON
+    frame_metadata_path = os.path.join(
+        FRAMES_DIR, video_id, f"Scene-{scene_number}.json")
+
+    # Check if frame metadata already exists
+    if os.path.exists(frame_metadata_path):
+        print(
+            f"Frame metadata already exists for {video_id} scene {scene_number}")
+        with open(frame_metadata_path, 'r') as f:
+            frame_data = json.load(f)
+
+        # Verify that the frame files actually exist
+        all_frames_exist = True
+        for frame in frame_data.get("frames", []):
+            if "frame_path" in frame and not os.path.exists(frame["frame_path"]):
+                all_frames_exist = False
+                break
+
+        if all_frames_exist:
+            return frame_data
+        else:
+            print(
+                f"Some frame images are missing for {video_id} scene {scene_number}, reprocessing...")
+
+    print(
+        f"Extracting keyframes from {video_id} scene {scene_number}...")
+
+    frame_data = {
+        "video_id": video_id,
+        "scene_number": scene_number,
+        "scene_path": scene_path,
+        "frames": [],
+    }
+
+    frame_count = 0
+    start_time = time.time()
+
+    try:
+        # Open the video file with PyAV
+        container = av.open(scene_path)
+
+        # Get video stream
+        video_stream = next(s for s in container.streams if s.type == 'video')
+
+        # Configure to only decode keyframes
+        video_stream.thread_type = 'AUTO'
+        # Only decode keyframes
+        video_stream.codec_context.skip_frame = 'NONKEY'
+
+        # Get video properties
+        video_fps = float(video_stream.average_rate)
+        duration = float(container.duration) / \
+            1000000.0  # Convert from microseconds
+        total_frames = video_stream.frames
+
+        # Update metadata with video properties
+        frame_data.update({
+            "fps": video_fps,
+            "duration": duration,
+            "total_frames": total_frames,
+            "extraction_mode": "keyframes_only"
+        })
+
+        # Process frames
+        extracted_frames = []
+
+        for frame in container.decode(video_stream):
+            # Calculate timestamp in seconds
+            timestamp = float(frame.pts * frame.time_base)
+
+            # Convert PyAV frame to numpy array
+            img = frame.to_ndarray(format='rgb24')
+
+            # Create unique frame filename
+            frame_filename = f"{video_id}_scene{scene_number}_time{timestamp:.2f}.jpg"
+            frame_path = os.path.join(video_frames_dir, frame_filename)
+
+            # Convert RGB to BGR for OpenCV
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+            # Save frame image
+            cv2.imwrite(frame_path, img_bgr)
+
+            # Add frame metadata
+            extracted_frames.append({
+                "frame_index": int(timestamp * video_fps),
+                "timestamp": timestamp,
+                "is_keyframe": True,  # All frames we get are keyframes
+                "frame_path": frame_path
+            })
+
+            frame_count += 1
+
+    except Exception as e:
+        print(f"Error extracting frames from {scene_path}: {e}")
+        frame_data["error"] = str(e)
+
+    finally:
+        # Calculate processing time
+        processing_time = time.time() - start_time
+
+        # Add summary information
+        frame_data["total_frames_extracted"] = frame_count
+        frame_data["processing_time_seconds"] = processing_time
+        frame_data["frames"] = extracted_frames
+
+        # Save frame metadata to JSON
+        with open(frame_metadata_path, 'w') as f:
+            json.dump(frame_data, f, indent=2)
+
+    print(
+        f"Extracted {frame_count} keyframes from {video_id} scene {scene_number} in {processing_time:.2f} seconds")
+    return frame_data
+
+
+def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language, asd_data=None, frame_data=None):
     """
     Create a consolidated JSON file for a scene that includes face metadata,
 
@@ -763,6 +898,7 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
         transcript_data: Dictionary with transcript data
         language: Detected language for the scene
         asd_data: Dictionary with ASD results
+        frame_data: Dictionary with extracted frames metadata
 
     Returns:
         Path to the consolidated JSON file
@@ -794,6 +930,15 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
     # Add ASD data if it exists
     if asd_data:
         consolidated_data["asd_data"] = asd_data
+
+    # Add frame data if it exists
+    if frame_data:
+        consolidated_data["frame_metadata"] = {
+            "total_frames_extracted": frame_data.get("total_frames_extracted", 0),
+            "extraction_mode": frame_data.get("extraction_mode", "keyframes_only"),
+            "processing_time_seconds": frame_data.get("processing_time_seconds"),
+            "frames": frame_data.get("frames", [])
+        }
 
     # Create the output directory if it doesn't exist
     scene_dir = os.path.join(SCENES_DIR, video_id)
@@ -867,9 +1012,13 @@ def process_video(video_id, existing_metadata):
             asd_data = process_asd(scene_path, video_id,
                                    scene_number, face_data)
 
+            # Extract frames from the scene
+            frame_data = extract_frames(scene_path, video_id, scene_number)
+
             # Create consolidated scene data JSON
             consolidated_json_path = create_consolidated_scene_data(
-                video_id, scene_path, scene_number, face_data, transcript, detected_language, asd_data)
+                video_id, scene_path, scene_number, face_data, transcript,
+                detected_language, asd_data, frame_data)
 
             print(f"Created consolidated scene data: {consolidated_json_path}")
 
@@ -909,6 +1058,13 @@ def process_video(video_id, existing_metadata):
                 metadata_entry['asd_results_path'] = asd_results_path
                 metadata_entry['asd_face_tracks'] = asd_data.get(
                     'face_tracks', 0)
+
+            # Add frame extraction information
+            frame_metadata_path = os.path.join(
+                FRAMES_DIR, video_id, f"Scene-{scene_number}.json")
+            metadata_entry['frame_metadata_path'] = frame_metadata_path
+            metadata_entry['frame_count'] = frame_data.get(
+                'total_frames_extracted', 0)
 
             result_metadata.append(metadata_entry)
 
