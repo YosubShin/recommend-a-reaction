@@ -697,8 +697,8 @@ def transcribe_scene(scene_path, video_id, scene_idx, language=None):
                 f"Transcribing with auto-detected language: {result.get('language', 'unknown')}")
 
         # Save transcript to file
-        with open(transcript_path, 'w') as f:
-            json.dump(result, f, indent=2)
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
 
         return result
     except Exception as e:
@@ -949,8 +949,8 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
     json_path = os.path.join(scene_dir, json_filename)
 
     # Save the consolidated data
-    with open(json_path, 'w') as f:
-        json.dump(consolidated_data, f, indent=2)
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(consolidated_data, f, indent=2, ensure_ascii=False)
 
     return json_path
 
