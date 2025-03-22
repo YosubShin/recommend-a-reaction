@@ -217,6 +217,12 @@ def find_context_reaction_pairs(output_dir):
                 is_pair = is_context_reaction_pair(
                     context_scene, reaction_scene)
 
+                # Get transcript text for context and reaction scenes
+                context_transcript = context_scene.get(
+                    "transcript", {}).get("text", "").strip()
+                reaction_transcript = reaction_scene.get(
+                    "transcript", {}).get("text", "").strip()
+
                 # Create result entry
                 result = {
                     "video_id": video_id,
@@ -226,7 +232,9 @@ def find_context_reaction_pairs(output_dir):
                     "reaction_scene_number": reaction_scene.get("scene_number", "unknown"),
                     "is_context_reaction_pair": is_pair,
                     "context_duration": context_scene.get("duration", 0),
-                    "reaction_duration": reaction_scene.get("duration", 0)
+                    "reaction_duration": reaction_scene.get("duration", 0),
+                    "context_transcript": context_transcript,
+                    "reaction_transcript": reaction_transcript
                 }
 
                 # If it's a context-reaction pair, extract middle frames
