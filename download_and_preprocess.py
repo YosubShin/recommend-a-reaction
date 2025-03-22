@@ -21,6 +21,7 @@ from scipy import signal
 from scipy.interpolate import interp1d
 from scipy.io import wavfile
 import python_speech_features
+import easyocr  # Add EasyOCR import
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
@@ -87,6 +88,11 @@ face_model = YOLO('.models/yolov8n-face.pt')
 # Load ASD model (Light-ASD)
 print("Loading Light-ASD model for active speaker detection...")
 light_asd = light_asd_setup(device=DEVICE)
+
+# Initialize EasyOCR reader (moved to global scope to avoid reinitializing for each frame)
+print("Loading EasyOCR model for text detection...")
+# You can add more languages as needed
+ocr_reader = easyocr.Reader(['en', 'ko'])
 
 # ASD helper functions
 
@@ -756,7 +762,7 @@ def detect_language(video_path):
 
 def extract_frames(scene_path, video_id, scene_number):
     """
-    Extract keyframes from a scene
+    Extract keyframes from a scene and create masked versions with text removed
 
     Args:
         scene_path: Path to the scene video file
@@ -786,6 +792,10 @@ def extract_frames(scene_path, video_id, scene_number):
         all_frames_exist = True
         for frame in frame_data.get("frames", []):
             if "frame_path" in frame and not os.path.exists(frame["frame_path"]):
+                all_frames_exist = False
+                break
+            # Also check if masked frames exist
+            if "masked_frame_path" in frame and not os.path.exists(frame["masked_frame_path"]):
                 all_frames_exist = False
                 break
 
@@ -846,22 +856,72 @@ def extract_frames(scene_path, video_id, scene_number):
 
             # Create unique frame filename
             frame_filename = f"{video_id}_scene{scene_number}_time{timestamp:.2f}.jpg"
+            masked_frame_filename = f"{video_id}_scene{scene_number}_time{timestamp:.2f}_masked.jpg"
             frame_path = os.path.join(video_frames_dir, frame_filename)
+            masked_frame_path = os.path.join(
+                video_frames_dir, masked_frame_filename)
 
             # Convert RGB to BGR for OpenCV
             img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-            # Save frame image
+            # Save original frame image
             cv2.imwrite(frame_path, img_bgr)
 
+            # Create masked version with text removed
+            try:
+                # Detect text using EasyOCR
+                result = ocr_reader.readtext(img_bgr)
+
+                # Create a copy of the image for masking
+                masked_img = img_bgr.copy()
+
+                # Track if any text was detected and masked
+                text_detected = False
+                detected_text = []
+
+                # Loop through each detected text region
+                for detection in result:
+                    # Get bounding box coordinates and text
+                    bbox = detection[0]
+                    text = detection[1]
+                    confidence = detection[2]
+
+                    # Convert to integer points for OpenCV
+                    points = np.array([[int(p[0]), int(p[1])] for p in bbox])
+
+                    # Create a mask for this region
+                    mask = np.zeros(img_bgr.shape[:2], dtype=np.uint8)
+                    cv2.fillPoly(mask, [points], 255)
+
+                    # Apply a black rectangle to mask the text
+                    masked_img[mask > 0] = [0, 0, 0]  # Black color
+
+                    text_detected = True
+                    detected_text.append(
+                        {"text": text, "confidence": confidence})
+
+                # Save the masked image
+                cv2.imwrite(masked_frame_path, masked_img)
+
+            except Exception as e:
+                print(f"Error masking text in frame: {e}")
+                # If text masking fails, just copy the original frame
+                cv2.imwrite(masked_frame_path, img_bgr)
+                text_detected = False
+                detected_text = []
+
             # Add frame metadata
-            extracted_frames.append({
+            frame_info = {
                 "frame_index": int(timestamp * video_fps),
                 "timestamp": timestamp,
                 "is_keyframe": True,  # All frames we get are keyframes
-                "frame_path": frame_path
-            })
+                "frame_path": frame_path,
+                "masked_frame_path": masked_frame_path,
+                "text_detected": text_detected,
+                "detected_text": detected_text
+            }
 
+            extracted_frames.append(frame_info)
             frame_count += 1
 
     except Exception as e:
