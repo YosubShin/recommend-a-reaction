@@ -60,8 +60,8 @@ NUM_WORKERS = args.workers
 FACE_DETECTION_FPS = args.face_detection_fps
 DATA_LOADER_THREAD = 10
 FACE_DETECTION_SCALE = 0.25
-MIN_TRACK_LENGTH = 10  # Number of min frames for each shot
-NUM_FAILED_DET = 10  # Number of missed detections allowed before tracking is stopped
+MIN_TRACK_LENGTH = 3  # Number of min frames for each shot
+NUM_FAILED_DET = 3  # Number of missed detections allowed before tracking is stopped
 MIN_FACE_SIZE = 1  # Minimum face size in pixels
 CROP_SCALE = 0.40  # Scale bounding box
 
