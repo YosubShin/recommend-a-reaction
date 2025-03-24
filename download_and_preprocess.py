@@ -201,8 +201,8 @@ def crop_video_from_frames(track, cropFile, frames, audio_file_path, start_frame
         mx = dets['x'][fidx] + bsi  # BBox center X
 
         # Ensure coordinates are valid
-        y_start = max(0, int(my-bs))
-        y_end = min(frame.shape[0], int(my+bs*(1+2*cs)))
+        y_start = max(0, int(my-bs*(1+cs)))
+        y_end = min(frame.shape[0], int(my+bs*(1+cs)))
         x_start = max(0, int(mx-bs*(1+cs)))
         x_end = min(frame.shape[1], int(mx+bs*(1+cs)))
 
@@ -505,10 +505,7 @@ def process_asd(scene_path, video_id, scene_number, face_detection_results, devi
 
     # Create output directories
     scene_asd_dir = os.path.join(ASD_DIR, video_id, f"Scene-{scene_number}")
-    scene_crops_dir = os.path.join(
-        scene_asd_dir, "crops")
     os.makedirs(scene_asd_dir, exist_ok=True)
-    os.makedirs(scene_crops_dir, exist_ok=True)
 
     # Path for ASD results
     asd_results_path = os.path.join(
@@ -553,7 +550,7 @@ def process_asd(scene_path, video_id, scene_number, face_detection_results, devi
     print(f"Cropping face tracks in {video_id} scene {scene_number}...")
     video_tracks = []
     for i, track in enumerate(face_tracks):
-        crop_file = os.path.join(scene_crops_dir, f"{i:05d}")
+        crop_file = os.path.join(scene_asd_dir, f"{i:05d}")
         track_result = crop_video_from_frames(
             track, crop_file, frames, scene_path)
         if track_result:
