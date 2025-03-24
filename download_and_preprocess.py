@@ -61,9 +61,9 @@ FACE_DETECTION_FPS = args.face_detection_fps
 DATA_LOADER_THREAD = 10
 FACE_DETECTION_SCALE = 0.25
 MIN_TRACK_LENGTH = 3  # Number of min frames for each shot
-NUM_FAILED_DET = 3  # Number of missed detections allowed before tracking is stopped
+NUM_FAILED_DET = 10  # Number of missed detections allowed before tracking is stopped
 MIN_FACE_SIZE = 1  # Minimum face size in pixels
-CROP_SCALE = 0.40  # Scale bounding box
+CROP_SCALE = 0.0  # Scale bounding box
 
 # Thread-safe lock for metadata updates
 metadata_lock = threading.Lock()
@@ -166,22 +166,48 @@ def track_shot(sceneFaces):
     return tracks
 
 
-def crop_video_from_frames(track, cropFile, frames, audio_file_path, start_frame=0):
-    """Crop face tracks from video frames and extract corresponding audio"""
-    # CPU: crop the face clips
-    os.makedirs(os.path.dirname(cropFile), exist_ok=True)
+def crop_video_from_frames(track, scene_asd_dir, track_idx, frames, audio_file_path, start_frame=0):
+    """
+    Crop face tracks from video frames and save as individual image files
 
-    vOut = cv2.VideoWriter(
-        cropFile + 't.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 25, (224, 224))  # Write video
+    Args:
+        track: Face track data
+        scene_asd_dir: Directory to save cropped face images
+        track_idx: Track index number
+        frames: List of video frames
+        audio_file_path: Path to the audio file
+        start_frame: Starting frame index
+
+    Returns:
+        Tuple of (metadata_dict, cropped_faces_list)
+    """
+    # Create track-specific directory
+    track_dir = os.path.join(scene_asd_dir, f"track_{track_idx}")
+    os.makedirs(track_dir, exist_ok=True)
+
+    # Base filename for this track
+    base_filename = f"track_{track_idx}"
+
+    # Prepare audio path
+    audioTmp = os.path.join(track_dir, f"{base_filename}.wav")
+
+    # Initialize list to store cropped faces
+    cropped_faces = []
+    face_image_paths = []
+
+    # Process detections
     dets = {'x': [], 'y': [], 's': []}
     for det in track['bbox']:  # Read the tracks
         dets['s'].append(max((det[3]-det[1]), (det[2]-det[0]))/2)
         dets['y'].append((det[1]+det[3])/2)  # crop center x
         dets['x'].append((det[0]+det[2])/2)  # crop center y
-    dets['s'] = signal.medfilt(dets['s'], kernel_size=13)  # Smooth detections
+
+    # Smooth detections
+    dets['s'] = signal.medfilt(dets['s'], kernel_size=13)
     dets['x'] = signal.medfilt(dets['x'], kernel_size=13)
     dets['y'] = signal.medfilt(dets['y'], kernel_size=13)
 
+    # Process each frame in the track
     for fidx, frame_idx in enumerate(track['frame']):
         cs = CROP_SCALE  # Crop scale
         bs = dets['s'][fidx]   # Detection box size
@@ -195,6 +221,7 @@ def crop_video_from_frames(track, cropFile, frames, audio_file_path, start_frame
                 f"Warning: Frame index {frame_idx} out of bounds ({len(frames)} frames available)")
             continue
 
+        # Pad the frame
         frame = np.pad(image, ((bsi, bsi), (bsi, bsi), (0, 0)),
                        'constant', constant_values=(110, 110))
         my = dets['y'][fidx] + bsi  # BBox center Y
@@ -211,6 +238,7 @@ def crop_video_from_frames(track, cropFile, frames, audio_file_path, start_frame
                 f"Warning: Invalid crop dimensions: {y_start}:{y_end}, {x_start}:{x_end}")
             continue
 
+        # Crop the face
         face = frame[y_start:y_end, x_start:x_end]
 
         # Ensure face is not empty
@@ -219,39 +247,52 @@ def crop_video_from_frames(track, cropFile, frames, audio_file_path, start_frame
             continue
 
         try:
-            resized_face = cv2.resize(face, (224, 224))
-            vOut.write(resized_face)
+            # Resize face to 112x112 (standard size for face processing)
+            resized_face = cv2.resize(face, (112, 112))
+            # Convert cropped faces to grayscale for ASD
+            resized_face = cv2.cvtColor(resized_face, cv2.COLOR_BGR2GRAY)
+
+            # Save face image
+            face_filename = f"{base_filename}_frame_{int(frame_idx)}.jpg"
+            face_path = os.path.join(track_dir, face_filename)
+            cv2.imwrite(face_path, resized_face)
+
+            # Store face image path
+            face_image_paths.append(face_path)
+
+            # Store face image in memory
+            cropped_faces.append(resized_face)
+
         except Exception as e:
-            print(f"Error resizing/writing face: {e}")
+            print(f"Error resizing/saving face: {e}")
             continue
 
-    vOut.release()
-
     # Extract audio segment corresponding to the face track
-    audioTmp = cropFile + '.wav'
-    audioStart = (track['frame'][0]) / 25
-    audioEnd = (track['frame'][-1]+1) / 25
-
-    command = (f"ffmpeg -y -i {audio_file_path} -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 "
-               f"-threads {DATA_LOADER_THREAD} -ss {audioStart:.3f} -to {audioEnd:.3f} {audioTmp} -loglevel panic")
-
     try:
+        audioStart = (track['frame'][0]) / 25
+        audioEnd = (track['frame'][-1]+1) / 25
+
+        command = (f"ffmpeg -y -i {audio_file_path} -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 "
+                   f"-threads {DATA_LOADER_THREAD} -ss {audioStart:.3f} -to {audioEnd:.3f} {audioTmp} -loglevel panic")
+
         output = subprocess.call(
             command, shell=True, stdout=None)  # Crop audio file
 
-        # Combine audio and video
-        command = (f"ffmpeg -y -i {cropFile}t.mp4 -i {audioTmp} -threads {DATA_LOADER_THREAD} "
-                   f"-c:v copy -c:a aac {cropFile}.mp4 -loglevel panic")
-        output = subprocess.call(command, shell=True, stdout=None)
+        # Create metadata
+        metadata = convert_numpy_to_lists({
+            'track': track,
+            'proc_track': dets,
+            'audio_file': audioTmp,
+            'face_image_paths': face_image_paths,
+            'track_dir': track_dir,
+            'track_idx': track_idx
+        })
 
-        # Clean up temporary files
-        if os.path.exists(cropFile + 't.mp4'):
-            os.remove(cropFile + 't.mp4')
+        return metadata, cropped_faces
 
-        return convert_numpy_to_lists({'track': track, 'proc_track': dets, 'crop_file': cropFile + '.mp4', 'audio_file': audioTmp})
     except Exception as e:
-        print(f"Error processing audio/video for face track: {e}")
-        return None
+        print(f"Error processing audio for face track: {e}")
+        return None, []
 
 
 def evaluate_light_asd_simplified(audioFeature, videoFeature, device):
@@ -281,52 +322,6 @@ def evaluate_light_asd_simplified(audioFeature, videoFeature, device):
     # Round scores to one decimal place
     scores = np.round(np.array(scores), 1).astype(float)
     return scores
-
-
-def evaluate_network(files, device):
-    """Run active speaker detection on multiple face tracks"""
-    # GPU: active speaker detection by pretrained model
-    allScores = []
-    for file in tqdm.tqdm(files, total=len(files)):
-        fileName = os.path.splitext(file.split(
-            '/')[-1])[0]  # Load audio and video
-        audio_file = os.path.join(os.path.dirname(file), fileName + '.wav')
-
-        try:
-            _, audio = wavfile.read(audio_file)
-            audioFeature = python_speech_features.mfcc(
-                audio, 16000, numcep=13, winlen=0.025, winstep=0.010)
-
-            video = cv2.VideoCapture(file)
-            videoFeature = []
-            while video.isOpened():
-                ret, frames = video.read()
-                if ret == True:
-                    face = cv2.cvtColor(frames, cv2.COLOR_BGR2GRAY)
-                    face = cv2.resize(face, (224, 224))
-                    face = face[int(112-(112/2)):int(112+(112/2)),
-                                int(112-(112/2)):int(112+(112/2))]
-                    videoFeature.append(face)
-                else:
-                    break
-            video.release()
-
-            if len(videoFeature) == 0:
-                print(f"Warning: No frames extracted from {file}")
-                allScores.append(np.array([]))
-                continue
-
-            videoFeature = np.array(videoFeature)
-
-            # Run ASD
-            allScore = evaluate_light_asd_simplified(
-                audioFeature, videoFeature, device)
-            allScores.append(allScore)
-        except Exception as e:
-            print(f"Error processing file {file}: {e}")
-            allScores.append(np.array([]))
-
-    return allScores
 
 
 def detect_faces_in_scene(scene_path, video_id, scene_number, fps=FACE_DETECTION_FPS):
@@ -496,7 +491,8 @@ def process_asd(scene_path, video_id, scene_number, face_detection_results, devi
         scene_path: Path to the scene video file
         video_id: YouTube video ID
         scene_number: Scene number (e.g., "001")
-        light_asd: TalkNet model instance
+        face_detection_results: Face detection results
+        device: Device to run ASD on
 
     Returns:
         Dictionary with ASD results
@@ -549,23 +545,46 @@ def process_asd(scene_path, video_id, scene_number, face_detection_results, devi
     # Step 5: Crop face tracks and extract audio
     print(f"Cropping face tracks in {video_id} scene {scene_number}...")
     video_tracks = []
+    all_cropped_faces = []
+
     for i, track in enumerate(face_tracks):
-        crop_file = os.path.join(scene_asd_dir, f"{i:05d}")
-        track_result = crop_video_from_frames(
-            track, crop_file, frames, scene_path)
+        track_result, cropped_faces = crop_video_from_frames(
+            track, scene_asd_dir, i, frames, scene_path)
+
         if track_result:
             video_tracks.append(track_result)
+            all_cropped_faces.append(cropped_faces)
 
     # Step 6: Run ASD on face tracks
     print(f"Running ASD on {len(video_tracks)} face tracks...")
-    crop_files = [track["crop_file"]
-                  for track in video_tracks if "crop_file" in track]
-    asd_scores = evaluate_network(crop_files, device)
+    asd_scores = []
+
+    for i, (track_data, cropped_faces) in enumerate(zip(video_tracks, all_cropped_faces)):
+        if len(cropped_faces) == 0:
+            asd_scores.append([])
+            continue
+
+        try:
+            # Load audio
+            audio_file = track_data["audio_file"]
+            _, audio = wavfile.read(audio_file)
+            audioFeature = python_speech_features.mfcc(
+                audio, 16000, numcep=13, winlen=0.025, winstep=0.010)
+
+            videoFeature = np.array(cropped_faces)
+
+            # Run ASD
+            scores = evaluate_light_asd_simplified(
+                audioFeature, videoFeature, device)
+            asd_scores.append(scores.tolist())
+        except Exception as e:
+            print(f"Error processing ASD for track {i}: {e}")
+            asd_scores.append([])
 
     # Add ASD scores to track results
     for i, (track, scores) in enumerate(zip(video_tracks, asd_scores)):
         if len(scores) > 0:
-            track["asd_scores"] = scores.tolist()
+            track["asd_scores"] = scores
 
     # Save ASD results
     asd_results = {
