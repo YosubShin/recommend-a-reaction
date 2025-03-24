@@ -20,3 +20,9 @@ python download_models.py
 ```
 python download_and_preprocess.py --output_dir=/home/yosubs/koa_scratch/recommend-a-reaction --workers=2
 ```
+
+# Login to Hugging Face for downloading Gemma3 model
+
+```
+huggingface-cli login
+```

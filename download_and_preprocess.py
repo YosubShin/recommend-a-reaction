@@ -23,6 +23,10 @@ from scipy.io import wavfile
 import python_speech_features
 import easyocr  # Add EasyOCR import
 
+# Add imports for emotion detection
+from transformers import pipeline
+from huggingface_hub import login
+
 # Parse command line arguments
 parser = argparse.ArgumentParser(
     description='Download, split YouTube videos into scenes, and transcribe them')
@@ -35,7 +39,7 @@ parser.add_argument('--face_detection_fps', type=int, default=5,
 args = parser.parse_args()
 
 # Configuration
-DEVICE = 'cpu'
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 URLS_FILE = 'video_ids.txt'
 OUTPUT_DIR = args.output_dir
 VIDEOS_DIR = os.path.join(OUTPUT_DIR, 'videos')
@@ -53,6 +57,8 @@ CONSOLIDATED_SCENE_DATA_DIR = os.path.join(OUTPUT_DIR, 'scenes')
 ASD_DIR = os.path.join(OUTPUT_DIR, 'asd')
 # Directory for extracted frames
 FRAMES_DIR = os.path.join(OUTPUT_DIR, 'frames')
+# Directory for face emotions
+FACE_EMOTIONS_DIR = os.path.join(OUTPUT_DIR, 'asd_face_emotions')
 # Number of parallel workers
 NUM_WORKERS = args.workers
 
@@ -76,14 +82,15 @@ os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)  # Create transcripts directory
 os.makedirs(FACES_DIR, exist_ok=True)  # Create faces directory
 os.makedirs(ASD_DIR, exist_ok=True)  # Create ASD directory
 os.makedirs(FRAMES_DIR, exist_ok=True)  # Create frames directory
+os.makedirs(FACE_EMOTIONS_DIR, exist_ok=True)  # Create face emotions directory
 
 # Load whisper turbo model
 print("Loading Whisper turbo model for transcription...")
-whisper_model = whisper.load_model("turbo")
+whisper_model = whisper.load_model("turbo", device=DEVICE)
 
 # Load YOLOv8n-face model
 print("Loading YOLOv8n-face model for face detection...")
-face_model = YOLO('.models/yolov8n-face.pt')
+face_model = YOLO('.models/yolov8n-face.pt', device=DEVICE)
 
 # Load ASD model (Light-ASD)
 print("Loading Light-ASD model for active speaker detection...")
@@ -92,7 +99,30 @@ light_asd = light_asd_setup(device=DEVICE)
 # Initialize EasyOCR reader (moved to global scope to avoid reinitializing for each frame)
 print("Loading EasyOCR model for text detection...")
 # You can add more languages as needed
-ocr_reader = easyocr.Reader(['en', 'ko'])
+ocr_reader = easyocr.Reader(['en', 'ko'], gpu=DEVICE == 'cuda')
+
+# Initialize emotion detection model if GPU is available
+emotion_pipe = None
+if DEVICE == 'cuda':
+    try:
+        print("Loading Gemma 3 model for emotion detection...")
+        # Try to login to Hugging Face Hub using environment variable
+        login()
+
+        # Initialize the Gemma 3 model
+        emotion_pipe = pipeline(
+            "image-text-to-text",
+            model="google/gemma-3-12b-it",
+            device=DEVICE,
+            torch_dtype=torch.bfloat16,
+            use_fast=True
+        )
+        print("Emotion detection model loaded successfully")
+    except Exception as e:
+        print(f"Error loading emotion detection model: {e}")
+        emotion_pipe = None
+else:
+    print("Skipping emotion detection model loading (GPU not available)")
 
 # ASD helper functions
 
@@ -1031,6 +1061,159 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
     return json_path
 
 
+def analyze_emotion(image_path, emotion_pipe, prompt="Describe the emotion in one sentence"):
+    """Analyze emotion in a face image using Gemma 3."""
+    try:
+        # Load the image
+        image = Image.open(image_path)
+
+        # Convert grayscale to RGB if needed
+        if image.mode == "L":
+            image = image.convert("RGB")
+
+        # Prepare messages for the model
+        messages = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are an emotion recognition assistant. Provide a brief, one-sentence description of the emotion shown in the face."}]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "url": image},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
+
+        # Process with the model with reduced generation parameters
+        start_time = time.time()
+
+        output = emotion_pipe(
+            text=messages,
+            max_new_tokens=20,  # Reduced token count for faster generation
+        )
+
+        end_time = time.time()
+
+        # Extract the response
+        response = output[0]["generated_text"][-1]["content"]
+
+        return response, (end_time - start_time)
+    except Exception as e:
+        print(f"Error analyzing {image_path}: {e}")
+        return None, 0
+
+
+def process_face_emotions(video_id, scene_number, asd_results, emotion_pipe):
+    """
+    Process emotions for faces in ASD results
+
+    Args:
+        video_id: YouTube video ID
+        scene_number: Scene number (e.g., "001")
+        asd_results: ASD results dictionary
+        emotion_pipe: Emotion detection pipeline
+
+    Returns:
+        Dictionary with emotion detection results
+    """
+    # Skip if emotion_pipe is not available
+    if emotion_pipe is None:
+        print(
+            f"Skipping emotion detection for {video_id} scene {scene_number} (GPU not available)")
+        return None
+
+    print(
+        f"Processing emotions for faces in {video_id} scene {scene_number}...")
+
+    # Create output directory
+    video_emotions_dir = os.path.join(FACE_EMOTIONS_DIR, video_id)
+    os.makedirs(video_emotions_dir, exist_ok=True)
+
+    # Path for emotion results
+    emotions_results_path = os.path.join(
+        video_emotions_dir, f"Scene-{scene_number}.json")
+
+    # Check if emotion results already exist
+    if os.path.exists(emotions_results_path):
+        print(
+            f"Emotion results already exist for {video_id} scene {scene_number}")
+        with open(emotions_results_path, 'r') as f:
+            return json.load(f)
+
+    # Initialize results structure
+    emotion_results = {
+        "video_id": video_id,
+        "scene_number": scene_number,
+        "tracks": [],
+        "statistics": {
+            "total_tracks": 0,
+            "total_faces_analyzed": 0,
+            "avg_latency": 0,
+            "processing_time": 0
+        }
+    }
+
+    start_time = time.time()
+    latencies = []
+    total_faces_analyzed = 0
+
+    # Process each track in the ASD results
+    if 'tracks' in asd_results:
+        for track_idx, track in enumerate(asd_results['tracks']):
+            track_emotions = {
+                "track_idx": track_idx,
+                "track_dir": track.get("track_dir", ""),
+                "faces": []
+            }
+
+            # Get face image paths from the track
+            face_paths = track.get("face_image_paths", [])
+
+            # If there are too many faces, just use a subset (e.g., every 5th face)
+            if len(face_paths) > 10:
+                step = len(face_paths) // 10
+                face_paths = face_paths[::step]
+
+            # Process each face in the track
+            for face_path in face_paths:
+                if os.path.exists(face_path):
+                    emotion, latency = analyze_emotion(face_path, emotion_pipe)
+
+                    if emotion:
+                        face_result = {
+                            "face_path": face_path,
+                            "emotion": emotion,
+                            "latency": latency
+                        }
+                        track_emotions["faces"].append(face_result)
+                        latencies.append(latency)
+                        total_faces_analyzed += 1
+
+            emotion_results["tracks"].append(track_emotions)
+
+    # Calculate statistics
+    processing_time = time.time() - start_time
+    avg_latency = np.mean(latencies) if latencies else 0
+
+    # Update statistics
+    emotion_results["statistics"] = {
+        "total_tracks": len(emotion_results["tracks"]),
+        "total_faces_analyzed": total_faces_analyzed,
+        "avg_latency": avg_latency,
+        "processing_time": processing_time
+    }
+
+    # Save results
+    with open(emotions_results_path, 'w') as f:
+        json.dump(emotion_results, f, indent=2)
+
+    print(
+        f"Processed emotions for {total_faces_analyzed} faces in {processing_time:.2f} seconds")
+    return emotion_results
+
+
 def process_video(video_id, existing_metadata):
     """Process a single video - download, split into scenes, and transcribe"""
     print(f"Processing video: {video_id}")
@@ -1088,6 +1271,12 @@ def process_video(video_id, existing_metadata):
             asd_data = process_asd(scene_path, video_id,
                                    scene_number, face_data)
 
+            # Process emotions for faces in ASD results (only if GPU is available)
+            emotion_data = None
+            if DEVICE == 'cuda' and emotion_pipe is not None and asd_data:
+                emotion_data = process_face_emotions(
+                    video_id, scene_number, asd_data, emotion_pipe)
+
             # Extract frames from the scene
             frame_data = extract_frames(scene_path, video_id, scene_number)
 
@@ -1134,6 +1323,14 @@ def process_video(video_id, existing_metadata):
                 metadata_entry['asd_results_path'] = asd_results_path
                 metadata_entry['asd_face_tracks'] = asd_data.get(
                     'face_tracks', 0)
+
+            # Add emotion detection information
+            if emotion_data:
+                emotion_results_path = os.path.join(
+                    FACE_EMOTIONS_DIR, video_id, f"Scene-{scene_number}.json")
+                metadata_entry['emotion_results_path'] = emotion_results_path
+                metadata_entry['emotion_faces_analyzed'] = emotion_data.get(
+                    'statistics', {}).get('total_faces_analyzed', 0)
 
             # Add frame extraction information
             frame_metadata_path = os.path.join(

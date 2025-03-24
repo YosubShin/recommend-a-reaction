@@ -8,3 +8,4 @@ av
 tf-keras
 python-speech-features
 easyocr
+transformers
