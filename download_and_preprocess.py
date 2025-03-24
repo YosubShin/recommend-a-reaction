@@ -90,7 +90,7 @@ whisper_model = whisper.load_model("turbo", device=DEVICE)
 
 # Load YOLOv8n-face model
 print("Loading YOLOv8n-face model for face detection...")
-face_model = YOLO('.models/yolov8n-face.pt', device=DEVICE)
+face_model = YOLO('.models/yolov8n-face.pt')
 
 # Load ASD model (Light-ASD)
 print("Loading Light-ASD model for active speaker detection...")
