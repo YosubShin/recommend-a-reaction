@@ -1171,10 +1171,11 @@ def process_face_emotions(video_id, scene_number, asd_results, emotion_pipe):
             # Get face image paths from the track
             face_paths = track.get("face_image_paths", [])
 
-            # If there are too many faces, just use a subset (e.g., every 5th face)
-            if len(face_paths) > 10:
-                step = len(face_paths) // 10
-                face_paths = face_paths[::step]
+            # Just use one middle face from the track for emotion analysis
+            if face_paths:
+                # Select the middle face from the track
+                middle_idx = len(face_paths) // 2
+                face_paths = [face_paths[middle_idx]]
 
             # Process each face in the track
             for face_path in face_paths:
