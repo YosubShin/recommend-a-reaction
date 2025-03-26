@@ -418,12 +418,16 @@ def detect_faces_in_scene(scene_path, video_id, scene_number, fps=FACE_DETECTION
         duration = float(container.duration) / \
             1000000.0  # Convert from microseconds
         total_frames = video_stream.frames
+        width = video_stream.width
+        height = video_stream.height
 
         # Update metadata with video properties
         face_data.update({
             "fps": video_fps,
             "duration": duration,
             "total_frames": total_frames,
+            "width": width,
+            "height": height,
         })
 
         # Calculate frame sampling rate
@@ -878,12 +882,16 @@ def extract_frames(scene_path, video_id, scene_number):
         duration = float(container.duration) / \
             1000000.0  # Convert from microseconds
         total_frames = video_stream.frames
+        width = video_stream.width
+        height = video_stream.height
 
         # Update metadata with video properties
         frame_data.update({
             "fps": video_fps,
             "duration": duration,
             "total_frames": total_frames,
+            "width": width,
+            "height": height,
             "extraction_mode": "keyframes_only"
         })
 
@@ -1015,6 +1023,8 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
         "fps": face_data.get("fps"),
         "duration": face_data.get("duration"),
         "total_frames": face_data.get("total_frames"),
+        "width": face_data.get("width"),
+        "height": face_data.get("height"),
 
         # Include face metadata
         "face_metadata": {
@@ -1294,6 +1304,8 @@ def process_video(video_id, existing_metadata):
                 'scene_path': scene_path,
                 'consolidated_data_path': consolidated_json_path,
                 'language': detected_language,
+                'width': face_data.get('width'),
+                'height': face_data.get('height'),
             }
 
             # Add transcript information
