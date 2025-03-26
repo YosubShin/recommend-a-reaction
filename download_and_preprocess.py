@@ -25,7 +25,6 @@ import easyocr  # Add EasyOCR import
 
 # Add imports for emotion detection
 from transformers import pipeline
-from huggingface_hub import login
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
@@ -106,8 +105,6 @@ emotion_pipe = None
 if DEVICE == 'cuda':
     try:
         print("Loading Gemma 3 model for emotion detection...")
-        # Try to login to Hugging Face Hub using environment variable
-        login()
 
         # Initialize the Gemma 3 model
         emotion_pipe = pipeline(
