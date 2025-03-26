@@ -402,12 +402,10 @@ def extract_emotion_data(scene):
         middle_idx = len(faces) // 2
         middle_face = faces[middle_idx]
 
-        emotion = middle_face.get("emotion", {})
+        emotion = middle_face.get("emotion", "")
         if emotion:
-            # Format the emotion data as a string
-            emotion_str = ";".join(
-                [f"{k}:{v:.2f}" for k, v in emotion.items()])
-            all_emotions.append(emotion_str)
+            # Since emotion is a string, just add it directly
+            all_emotions.append(emotion)
 
     # Join all emotions with commas
     return ",".join(all_emotions)
