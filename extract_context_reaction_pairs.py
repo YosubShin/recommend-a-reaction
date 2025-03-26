@@ -2,11 +2,6 @@ import json
 from deepface import DeepFace
 import cv2
 import os
-import tensorflow as tf
-
-# Force TensorFlow to use CPU only
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-tf.config.set_visible_devices([], 'GPU')
 
 
 def load_scene_data(scene_path):
