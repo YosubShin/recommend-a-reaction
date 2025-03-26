@@ -173,6 +173,57 @@ def is_context_reaction_pair(context_scene, reaction_scene):
 
     results["different_people_in_shots"] = not face_match_found
 
+    # Check if active speakers in context shot are not active speakers in reaction shot
+    active_speaker_in_both = False
+
+    # Get active speaker face images from context shot
+    context_active_speaker_images = []
+    context_asd_tracks = context_scene.get("asd_data", {}).get("tracks", [])
+    for track in context_asd_tracks:
+        asd_scores = track.get("asd_scores", [])
+        face_image_paths = track.get("face_image_paths", [])
+
+        # Check if this track has an active speaker
+        if any(score > 0 for score in asd_scores) and face_image_paths:
+            # Use the first face image of the active speaker
+            face_path = face_image_paths[0]
+            if os.path.exists(face_path):
+                context_active_speaker_images.append(cv2.imread(face_path))
+            else:
+                print(
+                    f"Warning: Active speaker face image not found at {face_path}")
+
+    # Get all faces from reaction shot (we already know there are no active speakers,
+    # but we want to make sure the context active speakers don't appear at all)
+    reaction_all_faces = []
+    reaction_asd_tracks = reaction_scene.get("asd_data", {}).get("tracks", [])
+    for track in reaction_asd_tracks:
+        face_image_paths = track.get("face_image_paths", [])
+        if face_image_paths:
+            # Use the first face image from each track
+            face_path = face_image_paths[0]
+            if os.path.exists(face_path):
+                reaction_all_faces.append(cv2.imread(face_path))
+            else:
+                print(f"Warning: Reaction face image not found at {face_path}")
+
+    # Compare each context active speaker with each face in reaction shot
+    for i, context_speaker in enumerate(context_active_speaker_images):
+        for j, reaction_face in enumerate(reaction_all_faces):
+            try:
+                result = DeepFace.verify(
+                    context_speaker, reaction_face, model_name="ArcFace")
+                if result["verified"]:
+                    active_speaker_in_both = True
+                    break
+            except Exception as e:
+                print(f"Active speaker comparison error: {e}")
+                continue
+        if active_speaker_in_both:
+            break
+
+    results["no_context_speakers_in_reaction"] = not active_speaker_in_both
+
     # Determine overall result - all conditions must be met
     results["overall_result"] = (
         results["context_duration_valid"] and
@@ -183,7 +234,8 @@ def is_context_reaction_pair(context_scene, reaction_scene):
         results["reaction_has_no_active_speaker"] and
         results["different_people_in_shots"] and
         results["no_crowded_frames"] and
-        results["has_large_enough_face"]
+        results["has_large_enough_face"] and
+        results["no_context_speakers_in_reaction"]
     )
 
     if results["overall_result"]:
