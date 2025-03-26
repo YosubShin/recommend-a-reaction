@@ -456,7 +456,7 @@ def extract_context_reaction_pairs(output_dir):
     results = find_context_reaction_pairs(output_dir)
 
     # Count positive pairs
-    positive_pairs = sum(1 for r in results if r["is_context_reaction_pair"])
+    positive_pairs = sum(1 for r in results if r["overall_result"])
 
     print(
         f"Found {positive_pairs} context-reaction pairs out of {len(results)} consecutive scene pairs")
