@@ -110,8 +110,6 @@ def is_context_reaction_pair(context_scene, reaction_scene):
     # Ensure screen_height is not None
     if screen_height is None:
         screen_height = 1080
-        print(
-            f"Warning: Screen height is None for {scene_pair_id}, using default 1080")
 
     # Check all frames in the reaction scene
     reaction_faces_data = reaction_scene.get(
