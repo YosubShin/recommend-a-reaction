@@ -223,6 +223,12 @@ def find_context_reaction_pairs(output_dir):
                 reaction_transcript = reaction_scene.get(
                     "transcript", {}).get("text", "").strip()
 
+                # Extract emotion data for context scene
+                context_emotions = extract_emotion_data(context_scene)
+
+                # Extract emotion data for reaction scene
+                reaction_emotions = extract_emotion_data(reaction_scene)
+
                 # Create result entry
                 result = {
                     "video_id": video_id,
@@ -234,35 +240,31 @@ def find_context_reaction_pairs(output_dir):
                     "context_duration": context_scene.get("duration", 0),
                     "reaction_duration": reaction_scene.get("duration", 0),
                     "context_transcript": context_transcript,
-                    "reaction_transcript": reaction_transcript
+                    "reaction_transcript": reaction_transcript,
+                    "context_emotions": context_emotions,
+                    "reaction_emotions": reaction_emotions
                 }
 
-                # If it's a context-reaction pair, extract middle frames
-                if is_pair:
-                    # Get middle frame for context scene
-                    context_frames = context_scene.get(
-                        "frame_metadata", {}).get("frames", [])
-                    if context_frames:
-                        middle_idx = len(context_frames) // 2
-                        context_middle_frame = context_frames[middle_idx].get(
-                            "masked_frame_path", "")
-                        result["context_middle_frame"] = context_middle_frame
-                    else:
-                        result["context_middle_frame"] = ""
-
-                    # Get middle frame for reaction scene
-                    reaction_frames = reaction_scene.get(
-                        "frame_metadata", {}).get("frames", [])
-                    if reaction_frames:
-                        middle_idx = len(reaction_frames) // 2
-                        reaction_middle_frame = reaction_frames[middle_idx].get(
-                            "masked_frame_path", "")
-                        result["reaction_middle_frame"] = reaction_middle_frame
-                    else:
-                        result["reaction_middle_frame"] = ""
+                # Get keyframe for context scene
+                context_frames = context_scene.get(
+                    "frame_metadata", {}).get("frames", [])
+                if context_frames:
+                    middle_idx = len(context_frames) // 2
+                    context_middle_frame = context_frames[middle_idx].get(
+                        "masked_frame_path", "")
+                    result["context_middle_frame"] = context_middle_frame
                 else:
-                    # If not a context-reaction pair, add empty values
                     result["context_middle_frame"] = ""
+
+                # Get keyframe for reaction scene
+                reaction_frames = reaction_scene.get(
+                    "frame_metadata", {}).get("frames", [])
+                if reaction_frames:
+                    middle_idx = len(reaction_frames) // 2
+                    reaction_middle_frame = reaction_frames[middle_idx].get(
+                        "masked_frame_path", "")
+                    result["reaction_middle_frame"] = reaction_middle_frame
+                else:
                     result["reaction_middle_frame"] = ""
 
                 results.append(result)
@@ -272,6 +274,44 @@ def find_context_reaction_pairs(output_dir):
                     f"Error processing scene pair {scene_files[i]} and {scene_files[i + 1]}: {e}")
 
     return results
+
+
+def extract_emotion_data(scene):
+    """
+    Extract emotion data from a scene.
+
+    Args:
+        scene (dict): Scene data
+
+    Returns:
+        str: Comma-separated emotion data from the scene
+    """
+    emotion_data = scene.get("emotion_data", {})
+    tracks = emotion_data.get("tracks", [])
+
+    if not tracks:
+        return ""
+
+    all_emotions = []
+
+    for track in tracks:
+        faces = track.get("faces", [])
+        if not faces:
+            continue
+
+        # Get the middle face in the track as representative
+        middle_idx = len(faces) // 2
+        middle_face = faces[middle_idx]
+
+        emotion = middle_face.get("emotion", {})
+        if emotion:
+            # Format the emotion data as a string
+            emotion_str = ";".join(
+                [f"{k}:{v:.2f}" for k, v in emotion.items()])
+            all_emotions.append(emotion_str)
+
+    # Join all emotions with commas
+    return ",".join(all_emotions)
 
 
 def save_results_to_csv(results, output_dir):
