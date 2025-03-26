@@ -997,7 +997,7 @@ def extract_frames(scene_path, video_id, scene_number):
     return frame_data
 
 
-def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language, asd_data=None, frame_data=None):
+def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data, transcript_data, language, asd_data=None, frame_data=None, emotion_data=None):
     """
     Create a consolidated JSON file for a scene that includes face metadata,
 
@@ -1010,6 +1010,7 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
         language: Detected language for the scene
         asd_data: Dictionary with ASD results
         frame_data: Dictionary with extracted frames metadata
+        emotion_data: Dictionary with emotion detection results
 
     Returns:
         Path to the consolidated JSON file
@@ -1051,6 +1052,15 @@ def create_consolidated_scene_data(video_id, scene_path, scene_number, face_data
             "extraction_mode": frame_data.get("extraction_mode", "keyframes_only"),
             "processing_time_seconds": frame_data.get("processing_time_seconds"),
             "frames": frame_data.get("frames", [])
+        }
+
+    # Add emotion data if it exists
+    if emotion_data:
+        consolidated_data["emotion_data"] = {
+            "total_tracks": emotion_data.get("statistics", {}).get("total_tracks", 0),
+            "total_faces_analyzed": emotion_data.get("statistics", {}).get("total_faces_analyzed", 0),
+            "processing_time": emotion_data.get("statistics", {}).get("processing_time", 0),
+            "tracks": emotion_data.get("tracks", [])
         }
 
     # Create the output directory if it doesn't exist
@@ -1291,7 +1301,7 @@ def process_video(video_id, existing_metadata):
             # Create consolidated scene data JSON
             consolidated_json_path = create_consolidated_scene_data(
                 video_id, scene_path, scene_number, face_data, transcript,
-                detected_language, asd_data, frame_data)
+                detected_language, asd_data, frame_data, emotion_data)
 
             print(f"Created consolidated scene data: {consolidated_json_path}")
 
