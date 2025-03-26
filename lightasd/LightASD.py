@@ -160,6 +160,6 @@ def setup(device='cpu'):
     }
 
     # Load model - pass the dictionary directly
-    model = LightASD(**args)
+    model = LightASD(**args, device=device)
     model.loadParameters(args['model_path'])
     return model
