@@ -370,6 +370,7 @@ def find_context_reaction_pairs(output_dir):
             except Exception as e:
                 print(
                     f"Error processing scene pair {scene_files[i]} and {scene_files[i + 1]}: {e}")
+                raise
 
     return results
 
