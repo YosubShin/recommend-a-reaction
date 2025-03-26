@@ -338,7 +338,6 @@ def find_context_reaction_pairs(output_dir):
                     "reaction_scene": scene_files[i + 1],
                     "context_scene_number": context_scene.get("scene_number", "unknown"),
                     "reaction_scene_number": reaction_scene.get("scene_number", "unknown"),
-                    "is_context_reaction_pair": is_pair,
                     "context_duration": context_scene.get("duration", 0),
                     "reaction_duration": reaction_scene.get("duration", 0),
                     "context_transcript": context_transcript,
@@ -346,6 +345,10 @@ def find_context_reaction_pairs(output_dir):
                     "context_emotions": context_emotions,
                     "reaction_emotions": reaction_emotions
                 }
+
+                # Add all individual criteria results from is_pair dictionary
+                for key, value in is_pair.items():
+                    result[f"criteria_{key}"] = value
 
                 # Get keyframe for context scene
                 context_frames = context_scene.get(
