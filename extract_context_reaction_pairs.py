@@ -2,6 +2,11 @@ import json
 from deepface import DeepFace
 import cv2
 import os
+import tensorflow as tf
+
+# Force TensorFlow to use CPU only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+tf.config.set_visible_devices([], 'GPU')
 
 
 def load_scene_data(scene_path):
@@ -163,15 +168,8 @@ def is_context_reaction_pair(context_scene, reaction_scene):
     for i, context_face in enumerate(context_face_images):
         for j, reaction_face in enumerate(reaction_face_images):
             try:
-                # Try with CPU backend if GPU is causing issues
                 result = DeepFace.verify(
-                    context_face, reaction_face,
-                    model_name="ArcFace",
-                    enforce_detection=False,
-                    detector_backend="opencv",
-                    align=True,
-                    normalization="base"
-                )
+                    context_face, reaction_face, model_name="ArcFace")
                 if result["verified"]:
                     face_match_found = True
                     break
@@ -222,15 +220,8 @@ def is_context_reaction_pair(context_scene, reaction_scene):
     for i, context_speaker in enumerate(context_active_speaker_images):
         for j, reaction_face in enumerate(reaction_all_faces):
             try:
-                # Try with CPU backend if GPU is causing issues
                 result = DeepFace.verify(
-                    context_speaker, reaction_face,
-                    model_name="ArcFace",
-                    enforce_detection=False,
-                    detector_backend="opencv",
-                    align=True,
-                    normalization="base"
-                )
+                    context_speaker, reaction_face, model_name="ArcFace")
                 if result["verified"]:
                     active_speaker_in_both = True
                     break
