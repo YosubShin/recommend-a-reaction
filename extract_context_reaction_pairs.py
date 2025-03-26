@@ -18,7 +18,7 @@ def is_context_reaction_pair(context_scene, reaction_scene):
         reaction_scene (dict): The second scene JSON data
 
     Returns:
-        bool: True if the scenes form a context-reaction pair, False otherwise
+        dict: Dictionary containing evaluation results for each condition and overall result
     """
     # Get scene identifiers for logging
     context_id = context_scene.get("video_id", "unknown")
@@ -29,36 +29,31 @@ def is_context_reaction_pair(context_scene, reaction_scene):
 
     print(f"\nEvaluating potential context-reaction pair: {scene_pair_id}")
 
+    # Initialize results dictionary
+    results = {
+        "overall_result": False,
+        "scene_pair_id": scene_pair_id
+    }
+
     # Check if context shot duration is between 1-6 seconds
     context_duration = context_scene.get("duration", 0)
-    if context_duration < 1 or context_duration > 6:
-        print(
-            f"FAIL: Context duration ({context_duration}s) not between 1-6 seconds")
-        return False
+    results["context_duration_valid"] = 1 <= context_duration <= 6
 
     # Check if reaction shot is less than 3 seconds
     reaction_duration = reaction_scene.get("duration", 0)
-    if reaction_duration > 3:
-        print(
-            f"FAIL: Reaction duration ({reaction_duration}s) exceeds 3 seconds")
-        return False
+    results["reaction_duration_valid"] = reaction_duration <= 3
 
     # Check if both shots have faces
     context_faces = context_scene.get(
         "face_metadata", {}).get("total_faces_detected", 0)
     reaction_faces = reaction_scene.get(
         "face_metadata", {}).get("total_faces_detected", 0)
-    if context_faces == 0 or reaction_faces == 0:
-        print(
-            f"FAIL: Missing faces in shots (context: {context_faces}, reaction: {reaction_faces})")
-        return False
+    results["both_shots_have_faces"] = context_faces > 0 and reaction_faces > 0
 
     # Check if there's speech in the context shot
     context_transcript = context_scene.get(
         "transcript", {}).get("text", "").strip()
-    if not context_transcript:
-        print(f"FAIL: No speech transcript in context shot")
-        return False
+    results["context_has_speech"] = bool(context_transcript)
 
     # Check if there is an active speaker in the context shot
     has_active_speaker = False
@@ -70,9 +65,7 @@ def is_context_reaction_pair(context_scene, reaction_scene):
             has_active_speaker = True
             break
 
-    if not has_active_speaker:
-        print(f"FAIL: No active speaker detected in context shot")
-        return False
+    results["context_has_active_speaker"] = has_active_speaker
 
     # Check if there is an active speaker in the reaction shot (should NOT have one)
     reaction_has_active_speaker = False
@@ -84,10 +77,7 @@ def is_context_reaction_pair(context_scene, reaction_scene):
             reaction_has_active_speaker = True
             break
 
-    if reaction_has_active_speaker:
-        print(
-            f"FAIL: Active speaker detected in reaction shot (reactions should be silent)")
-        return False
+    results["reaction_has_no_active_speaker"] = not reaction_has_active_speaker
 
     # Check if it's an L-cut by comparing faces using DeepFace
     # Get face images from the last frame of context scene
@@ -126,9 +116,6 @@ def is_context_reaction_pair(context_scene, reaction_scene):
                 result = DeepFace.verify(
                     context_face, reaction_face, model_name="ArcFace")
                 if result["verified"]:
-                    # Same person found in both shots, not an L-cut
-                    print(
-                        f"FAIL: Same person found in both shots (context face {i+1}, reaction face {j+1})")
                     face_match_found = True
                     break
             except Exception as e:
@@ -138,13 +125,24 @@ def is_context_reaction_pair(context_scene, reaction_scene):
         if face_match_found:
             break
 
-    if face_match_found:
-        return False
+    results["different_people_in_shots"] = not face_match_found
 
-    # If all criteria are met, it's a context-reaction pair
-    print(
-        f"SUCCESS: All criteria met for context-reaction pair {scene_pair_id}")
-    return True
+    # Determine overall result - all conditions must be met
+    results["overall_result"] = (
+        results["context_duration_valid"] and
+        results["reaction_duration_valid"] and
+        results["both_shots_have_faces"] and
+        results["context_has_speech"] and
+        results["context_has_active_speaker"] and
+        results["reaction_has_no_active_speaker"] and
+        results["different_people_in_shots"]
+    )
+
+    if results["overall_result"]:
+        print(
+            f"SUCCESS: All criteria met for context-reaction pair {scene_pair_id}")
+
+    return results
 
 
 def test_context_reaction_pair():
