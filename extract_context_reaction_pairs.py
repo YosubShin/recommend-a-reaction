@@ -79,6 +79,52 @@ def is_context_reaction_pair(context_scene, reaction_scene):
 
     results["reaction_has_no_active_speaker"] = not reaction_has_active_speaker
 
+    # Check if any frame has 4 or more faces (should NOT have too many faces)
+    too_many_faces = False
+
+    # Check context scene frames
+    context_faces_data = context_scene.get(
+        "face_metadata", {}).get("faces", [])
+    for frame_faces in context_faces_data:
+        if len(frame_faces) >= 4:
+            too_many_faces = True
+            break
+
+    # Check reaction scene frames if context is okay
+    if not too_many_faces:
+        reaction_faces_data = reaction_scene.get(
+            "face_metadata", {}).get("faces", [])
+        for frame_faces in reaction_faces_data:
+            if len(frame_faces) >= 4:
+                too_many_faces = True
+                break
+
+    results["no_crowded_frames"] = not too_many_faces
+
+    # Check if the biggest face in the reaction shot is at least 10% of the screen height
+    has_large_enough_face = False
+
+    # Get screen height from metadata or use default 1080
+    screen_height = reaction_scene.get("height", 1080)
+
+    # Check all frames in the reaction scene
+    reaction_faces_data = reaction_scene.get(
+        "face_metadata", {}).get("faces", [])
+    for frame_faces in reaction_faces_data:
+        for face in frame_faces:
+            bbox = face.get("bbox", [0, 0, 0, 0])
+            if len(bbox) >= 4:
+                # Calculate face height (y2 - y1)
+                face_height = bbox[3] - bbox[1]
+                # Check if face height is at least 10% of screen height
+                if face_height >= 0.1 * screen_height:
+                    has_large_enough_face = True
+                    break
+        if has_large_enough_face:
+            break
+
+    results["has_large_enough_face"] = has_large_enough_face
+
     # Check if it's an L-cut by comparing faces using DeepFace
     # Get face images from the last frame of context scene
     context_face_images = []
@@ -135,7 +181,9 @@ def is_context_reaction_pair(context_scene, reaction_scene):
         results["context_has_speech"] and
         results["context_has_active_speaker"] and
         results["reaction_has_no_active_speaker"] and
-        results["different_people_in_shots"]
+        results["different_people_in_shots"] and
+        results["no_crowded_frames"] and
+        results["has_large_enough_face"]
     )
 
     if results["overall_result"]:
