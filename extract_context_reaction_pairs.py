@@ -61,8 +61,15 @@ def is_context_reaction_pair(context_scene, reaction_scene):
     tracks = asd_data.get("tracks", [])
     for track in tracks:
         asd_scores = track.get("asd_scores", [])
-        if any(score > 0 for score in asd_scores):
-            has_active_speaker = True
+        # Use moving average over 5 frames with threshold of 0.8
+        if len(asd_scores) >= 5:
+            for i in range(len(asd_scores) - 4):
+                window = asd_scores[i:i+5]
+                moving_avg = sum(window) / 5
+                if moving_avg >= 0.8:
+                    has_active_speaker = True
+                    break
+        if has_active_speaker:
             break
 
     results["context_has_active_speaker"] = has_active_speaker
@@ -73,8 +80,17 @@ def is_context_reaction_pair(context_scene, reaction_scene):
     reaction_tracks = reaction_asd_data.get("tracks", [])
     for track in reaction_tracks:
         asd_scores = track.get("asd_scores", [])
-        if any(score > 0 for score in asd_scores):
+        # Use moving average over 5 frames but keep threshold at 0
+        if len(asd_scores) >= 5:
+            for i in range(len(asd_scores) - 4):
+                window = asd_scores[i:i+5]
+                moving_avg = sum(window) / 5
+                if moving_avg > 0:
+                    reaction_has_active_speaker = True
+                    break
+        elif any(score > 0 for score in asd_scores):  # For shorter tracks
             reaction_has_active_speaker = True
+        if reaction_has_active_speaker:
             break
 
     results["reaction_has_no_active_speaker"] = not reaction_has_active_speaker
