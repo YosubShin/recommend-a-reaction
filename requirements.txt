@@ -9,3 +9,5 @@ tf-keras
 python-speech-features
 easyocr
 transformers
+openai
+pydantic
