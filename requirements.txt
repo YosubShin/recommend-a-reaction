@@ -11,3 +11,5 @@ easyocr
 transformers
 openai
 pydantic
+flask
+pandas

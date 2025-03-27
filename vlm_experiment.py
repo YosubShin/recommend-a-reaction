@@ -49,33 +49,6 @@ def encode_image(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 
-def create_prompt(context_data, reaction_a_data, reaction_b_data):
-    """Create a prompt for the model with context and two possible reactions"""
-    prompt = "Here is a scene from a TV show and two possible reactions.\n\n"
-
-    # Add context scene
-    prompt += "Context Scene:\n"
-    prompt += f"- Image: [context frame]\n"
-    if context_data.get('transcript'):
-        prompt += f"- Transcript: \"{context_data.get('transcript')}\"\n\n"
-
-    # Add reaction A
-    prompt += "Reaction A:\n"
-    prompt += f"- Image: [reaction A frame]\n"
-    if reaction_a_data.get('emotions'):
-        prompt += f"- Detected Emotion: \"{reaction_a_data.get('emotions')}\"\n\n"
-
-    # Add reaction B
-    prompt += "Reaction B:\n"
-    prompt += f"- Image: [reaction B frame]\n"
-    if reaction_b_data.get('emotions'):
-        prompt += f"- Detected Emotion: \"{reaction_b_data.get('emotions')}\"\n\n"
-
-    prompt += "Question: Which reaction better fits the context and why?\nAnswer:"
-
-    return prompt
-
-
 def query_model(context_data, reaction_a_data, reaction_b_data, model_name="gpt-4o"):
     """Query the OpenAI model with the context and reactions"""
     context_image = encode_image(context_data.get('middle_frame'))
@@ -313,7 +286,7 @@ if __name__ == "__main__":
     csv_file = "output/context_reaction_pairs.csv"
     results_dir = "output/vlm_experiment"
     model_name = "gpt-4o"
-    sample_size = 2  # Set to None to use all entries
+    sample_size = 100  # Set to None to use all entries
 
     # Run the experiment
     results = run_experiment(csv_file, results_dir, model_name, sample_size)
