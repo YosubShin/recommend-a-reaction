@@ -170,7 +170,7 @@ def is_context_reaction_pair(context_scene, reaction_scene):
                     break
             except Exception as e:
                 # If comparison fails, continue with other faces
-                print(f"Face comparison error: {e}")
+                print(f"Face comparison error at indices {i},{j}: {e}")
                 continue
         if face_match_found:
             break
@@ -221,7 +221,8 @@ def is_context_reaction_pair(context_scene, reaction_scene):
                     active_speaker_in_both = True
                     break
             except Exception as e:
-                print(f"Active speaker comparison error: {e}")
+                print(
+                    f"Active speaker comparison error at indices {i},{j}: {e}")
                 continue
         if active_speaker_in_both:
             break
@@ -456,7 +457,7 @@ def extract_context_reaction_pairs(output_dir):
     results = find_context_reaction_pairs(output_dir)
 
     # Count positive pairs
-    positive_pairs = sum(1 for r in results if r["overall_result"])
+    positive_pairs = sum(1 for r in results if r["criteria_overall_result"])
 
     print(
         f"Found {positive_pairs} context-reaction pairs out of {len(results)} consecutive scene pairs")
