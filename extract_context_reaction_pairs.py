@@ -454,7 +454,7 @@ def save_results_to_csv(results, output_dir):
     # Get fieldnames from the first result
     fieldnames = results[0].keys()
 
-    with open(csv_path, 'w', newline='') as csvfile:
+    with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)

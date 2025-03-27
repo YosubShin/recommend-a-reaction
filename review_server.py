@@ -8,9 +8,12 @@ from pathlib import Path
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
 # Define paths to your data files
-RESULTS_PATH = 'output/vlm_experiment/context_reaction_results_20250327_105647.json'
-CSV_PATH = 'output/context_reaction_pairs_20250327_105647.csv'
-FRAMES_DIR = 'output/frames'
+OUTPUT_DIR = './output'
+RESULTS_PATH = os.path.join(
+    OUTPUT_DIR, 'vlm_experiment', 'context_reaction_results_20250327_105647.json')
+CSV_PATH = os.path.join(
+    OUTPUT_DIR, 'context_reaction_pairs_20250327_105647.csv')
+FRAMES_DIR = os.path.join(OUTPUT_DIR, 'frames')
 
 
 @app.route('/')
@@ -27,17 +30,15 @@ def get_review_data():
         model_results = json.load(f)
 
     # Load the CSV data using pandas for easier handling
-    df = pd.read_csv(CSV_PATH)
+    df = pd.read_csv(CSV_PATH, encoding='utf-8')
 
     # Process and combine the data
     combined_data = []
     for entry in model_results:
         video_id = entry['video_id']
-        context_scene_number = str(entry['context_scene_number']).zfill(3)
-        true_reaction_scene_number = str(
-            entry['true_reaction_scene_number']).zfill(3)
-        random_reaction_scene_number = str(
-            entry['random_reaction_scene_number']).zfill(3)
+        context_scene_number = entry['context_scene_number']
+        true_reaction_scene_number = entry['true_reaction_scene_number']
+        random_reaction_scene_number = entry['random_reaction_scene_number']
 
         # Find the corresponding rows in the CSV data
         context_row = df[(df['video_id'] == video_id) &
@@ -62,28 +63,28 @@ def get_review_data():
         # Create relative paths for images that will work with our server
         context_image = context_data.get('context_middle_frame', '')
         if context_image:
-            context_image = f"/frames/{video_id}/{os.path.basename(context_image)}"
+            context_image = os.path.relpath(context_image, OUTPUT_DIR)
 
         option_a_image = ''
         if option_a_data:
             option_a_image = option_a_data.get('context_middle_frame', '')
             if option_a_image:
-                option_a_image = f"/frames/{video_id}/{os.path.basename(option_a_image)}"
+                option_a_image = os.path.relpath(option_a_image, OUTPUT_DIR)
 
         option_b_image = ''
         if option_b_data:
             option_b_image = option_b_data.get('context_middle_frame', '')
             if option_b_image:
-                option_b_image = f"/frames/{video_id}/{os.path.basename(option_b_image)}"
+                option_b_image = os.path.relpath(option_b_image, OUTPUT_DIR)
 
         # Create a combined entry
         combined_entry = {
             **entry,
             'context_transcript': context_data.get('context_transcript', ''),
             'context_image_path': context_image,
-            'option_a_transcript': option_a_data.get('context_transcript', '') if option_a_data else '',
+            'option_a_transcript': '' if pd.isna(option_a_data.get('reaction_transcript', '')) else option_a_data.get('reaction_transcript', ''),
             'option_a_image_path': option_a_image,
-            'option_b_transcript': option_b_data.get('context_transcript', '') if option_b_data else '',
+            'option_b_transcript': '' if pd.isna(option_b_data.get('reaction_transcript', '')) else option_b_data.get('reaction_transcript', ''),
             'option_b_image_path': option_b_image,
             'is_correct': entry['correct_answer'] == entry['model_response'] or
             (entry['correct_answer'] == 'A' and entry['model_response'] == 'Reaction A') or
@@ -96,22 +97,10 @@ def get_review_data():
     return jsonify(combined_data)
 
 
-@app.route('/frames/<video_id>/<filename>')
-def serve_frame(video_id, filename):
+@app.route('/<path:filename>')
+def serve_file(filename):
     """Serve frame images from the frames directory"""
-    # Extract scene number from filename
-    parts = filename.split('_')
-    if len(parts) >= 2:
-        scene_part = parts[1]
-        scene_number = scene_part.replace('scene', '')
-
-        # Construct the path to the image
-        scene_dir = f"Scene-{scene_number}"
-        image_path = os.path.join(FRAMES_DIR, video_id, scene_dir)
-
-        return send_from_directory(image_path, filename)
-
-    return "Image not found", 404
+    return send_from_directory(OUTPUT_DIR, filename)
 
 
 if __name__ == '__main__':
@@ -331,7 +320,7 @@ if __name__ == '__main__':
                 <div class="scenes">
                     <div class="scene">
                         <h3>Context Scene</h3>
-                        <img class="scene-image" src="${entry.context_image_path}" alt="Context Scene">
+                        <img class="scene-image" src="/${entry.context_image_path}" alt="Context Scene">
                         <div class="transcript">
                             <strong>Transcript:</strong> ${entry.context_transcript || 'No transcript available'}
                         </div>
@@ -339,7 +328,7 @@ if __name__ == '__main__':
                     
                     <div class="scene">
                         <h3>Option A</h3>
-                        <img class="scene-image" src="${entry.option_a_image_path}" alt="Option A">
+                        <img class="scene-image" src="/${entry.option_a_image_path}" alt="Option A">
                         <div class="transcript">
                             <strong>Transcript:</strong> ${entry.option_a_transcript || 'No transcript available'}
                         </div>
@@ -347,7 +336,7 @@ if __name__ == '__main__':
                     
                     <div class="scene">
                         <h3>Option B</h3>
-                        <img class="scene-image" src="${entry.option_b_image_path}" alt="Option B">
+                        <img class="scene-image" src="/${entry.option_b_image_path}" alt="Option B">
                         <div class="transcript">
                             <strong>Transcript:</strong> ${entry.option_b_transcript || 'No transcript available'}
                         </div>

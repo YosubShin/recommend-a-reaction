@@ -125,7 +125,7 @@ def query_model(context_data, reaction_a_data, reaction_b_data, model_name="gpt-
 def load_scene_data(scene_file_path):
     """Load scene data from a JSON file"""
     try:
-        with open(scene_file_path, 'r') as f:
+        with open(scene_file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         logging.error(f"Error loading scene file {scene_file_path}: {e}")
@@ -241,8 +241,8 @@ def run_experiment(csv_file, results_dir, model_name="gpt-4o", sample_size=None)
 
     # Save results
     results_file = results_dir / f"context_reaction_results_{timestamp}.json"
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
+    with open(results_file, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
 
     logging.info(
         f"Experiment completed. Prompt tokens: {total_prompt_tokens}, Completion tokens: {total_completion_tokens}, Total tokens: {total_tokens}")
