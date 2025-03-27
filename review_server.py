@@ -168,6 +168,15 @@ if __name__ == '__main__':
             border-radius: 3px;
             font-size: 14px;
         }
+        .reaction-transcript {
+            display: none; /* Hidden by default */
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-radius: 5px;
+        }
         .model-info {
             background-color: #e6f7ff;
             padding: 15px;
@@ -226,6 +235,13 @@ if __name__ == '__main__':
 <body>
     <div class="review-container">
         <h1>Context-Reaction Experiment Review</h1>
+        
+        <div class="controls">
+            <label>
+                <input type="checkbox" id="show-transcripts"> Show Reaction Transcripts
+            </label>
+            <p><small>Note: The model does not see reaction transcripts during evaluation.</small></p>
+        </div>
         
         <div class="pagination">
             <button id="prev-page">Previous</button>
@@ -312,7 +328,8 @@ if __name__ == '__main__':
                 <div class="entry-header">
                     <div>
                         <strong>Entry ID:</strong> ${entry.entry_id} | 
-                        <strong>Video ID:</strong> ${entry.video_id}
+                        <strong>Video ID:</strong> ${entry.video_id} |
+                        <strong>Context Scene #:</strong> ${entry.context_scene_number}
                     </div>
                     <button class="flag-button" onclick="toggleFlag(this)">Flag for Review</button>
                 </div>
@@ -327,17 +344,17 @@ if __name__ == '__main__':
                     </div>
                     
                     <div class="scene">
-                        <h3>Option A</h3>
-                        <img class="scene-image" src="/${entry.option_a_image_path}" alt="Option A">
-                        <div class="transcript">
+                        <h3>Reaction A</h3>
+                        <img class="scene-image" src="/${entry.option_a_image_path}" alt="Reaction A">
+                        <div class="transcript reaction-transcript">
                             <strong>Transcript:</strong> ${entry.option_a_transcript || 'No transcript available'}
                         </div>
                     </div>
                     
                     <div class="scene">
-                        <h3>Option B</h3>
-                        <img class="scene-image" src="/${entry.option_b_image_path}" alt="Option B">
-                        <div class="transcript">
+                        <h3>Reaction B</h3>
+                        <img class="scene-image" src="/${entry.option_b_image_path}" alt="Reaction B">
+                        <div class="transcript reaction-transcript">
                             <strong>Transcript:</strong> ${entry.option_b_transcript || 'No transcript available'}
                         </div>
                     </div>
@@ -373,6 +390,14 @@ if __name__ == '__main__':
             
             localStorage.setItem('flaggedEntries', JSON.stringify(flaggedEntries));
         }
+        
+        // Toggle reaction transcripts visibility
+        document.getElementById('show-transcripts').addEventListener('change', function() {
+            const transcripts = document.querySelectorAll('.reaction-transcript');
+            transcripts.forEach(transcript => {
+                transcript.style.display = this.checked ? 'block' : 'none';
+            });
+        });
         
         // Set up navigation
         document.getElementById('prev-page').addEventListener('click', () => {
