@@ -169,6 +169,104 @@ def serve_file(filename):
     return send_from_directory(OUTPUT_DIR, filename)
 
 
+@app.route('/stats')
+def stats():
+    """Serve the statistics page"""
+    return render_template('stats_page.html')
+
+
+@app.route('/api/stats-data')
+def get_stats_data():
+    """Return statistics about model and human performance"""
+    # Load the model results
+    with open(RESULTS_PATH, 'r') as f:
+        model_results = json.load(f)
+
+    # Load human annotations
+    human_annotations = load_human_annotations()
+
+    # Calculate statistics
+    total_entries = len(model_results)
+    model_correct = 0
+    human_correct = 0
+    human_annotated = 0
+
+    # For more detailed analysis
+    stats = {
+        'total': total_entries,
+        'model_correct': 0,
+        'model_accuracy': 0,
+        'human_annotated': 0,
+        'human_correct': 0,
+        'human_accuracy': 0,
+        'agreement_count': 0,
+        'agreement_rate': 0,
+        'confidence_distribution': {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+        'confidence_accuracy': {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+        'confidence_counts': {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    }
+
+    for entry in model_results:
+        entry_id = str(entry['entry_id'])
+
+        # Check model correctness
+        model_is_correct = (
+            entry['correct_answer'] == entry['model_response'] or
+            (entry['correct_answer'] == 'A' and entry['model_response'] == 'Reaction A') or
+            (entry['correct_answer'] ==
+             'B' and entry['model_response'] == 'Reaction B')
+        )
+
+        if model_is_correct:
+            stats['model_correct'] += 1
+
+        # Check human annotation if available
+        if entry_id in human_annotations:
+            human_annotation = human_annotations[entry_id]
+            stats['human_annotated'] += 1
+
+            if human_annotation['human_response'] == entry['correct_answer']:
+                stats['human_correct'] += 1
+
+            # Track agreement between model and human
+            human_response = human_annotation['human_response']
+            model_response = entry['model_response']
+            if model_response in ['A', 'B', 'Reaction A', 'Reaction B']:
+                model_choice = model_response[0] if model_response in [
+                    'A', 'B'] else model_response[9]
+                if model_choice == human_response:
+                    stats['agreement_count'] += 1
+
+            # Track confidence distribution and accuracy by confidence
+            if 'confidence' in human_annotation:
+                confidence = human_annotation['confidence']
+                stats['confidence_distribution'][confidence] += 1
+                stats['confidence_counts'][confidence] += 1
+                if human_annotation['human_response'] == entry['correct_answer']:
+                    stats['confidence_accuracy'][confidence] += 1
+
+    # Calculate percentages
+    if total_entries > 0:
+        stats['model_accuracy'] = (
+            stats['model_correct'] / total_entries) * 100
+
+    if stats['human_annotated'] > 0:
+        stats['human_accuracy'] = (
+            stats['human_correct'] / stats['human_annotated']) * 100
+        stats['agreement_rate'] = (
+            stats['agreement_count'] / stats['human_annotated']) * 100
+
+        # Calculate accuracy by confidence level
+        for level in range(1, 6):
+            if stats['confidence_counts'][level] > 0:
+                stats['confidence_accuracy'][level] = (
+                    stats['confidence_accuracy'][level] /
+                    stats['confidence_counts'][level]
+                ) * 100
+
+    return jsonify(stats)
+
+
 if __name__ == '__main__':
     # Make sure the template directory exists
     os.makedirs('templates', exist_ok=True)
@@ -298,11 +396,39 @@ if __name__ == '__main__':
             padding: 50px;
             font-size: 18px;
         }
+        .human-annotation {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f0f7ff;
+            border-radius: 5px;
+            border-left: 4px solid #2196F3;
+        }
+        .menu-bar {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        .menu-button {
+            padding: 8px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            margin-left: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="review-container">
-        <h1>Context-Reaction Experiment Review</h1>
+        <div class="menu-bar">
+            <h1>Context-Reaction Experiment Review</h1>
+            <div>
+                <a href="/annotate" class="menu-button">Annotation Interface</a>
+                <a href="/stats" class="menu-button">View Statistics</a>
+            </div>
+        </div>
         
         <div class="controls">
             <label>
@@ -392,6 +518,25 @@ if __name__ == '__main__':
             const correctnessClass = isCorrect ? 'correct' : 'incorrect';
             const correctnessText = isCorrect ? 'CORRECT' : 'INCORRECT';
             
+            // Human annotation display
+            let humanAnnotationHtml = '<p>No human annotation yet</p>';
+            if (entry.human_annotation && entry.human_annotation.human_response) {
+                const humanIsCorrect = entry.human_annotation.human_response === entry.correct_answer;
+                const humanCorrectnessClass = humanIsCorrect ? 'correct' : 'incorrect';
+                const humanCorrectnessText = humanIsCorrect ? 'CORRECT' : 'INCORRECT';
+                const confidenceText = entry.human_annotation.confidence ? 
+                    `Confidence: ${entry.human_annotation.confidence}/5` : '';
+                const notesText = entry.human_annotation.notes ? 
+                    `<p><strong>Notes:</strong> ${entry.human_annotation.notes}</p>` : '';
+                
+                humanAnnotationHtml = `
+                    <p><strong>Human Response:</strong> <span class="${humanCorrectnessClass}">
+                        Option ${entry.human_annotation.human_response} (${humanCorrectnessText})
+                    </span> ${confidenceText}</p>
+                    ${notesText}
+                `;
+            }
+            
             entryElement.innerHTML = `
                 <div class="entry-header">
                     <div>
@@ -432,6 +577,10 @@ if __name__ == '__main__':
                     <p><strong>Ground Truth:</strong> Option ${entry.correct_answer}</p>
                     <p><strong>Model Prediction:</strong> <span class="${correctnessClass}">${entry.model_response} (${correctnessText})</span></p>
                     <p><strong>Model Reasoning:</strong> ${entry.model_reason}</p>
+                    <div class="human-annotation">
+                        <h4>Human Annotation:</h4>
+                        ${humanAnnotationHtml}
+                    </div>
                 </div>
             `;
             
@@ -661,6 +810,7 @@ if __name__ == '__main__':
             border-radius: 4px;
             cursor: pointer;
             text-decoration: none;
+            margin-left: 10px;
         }
     </style>
 </head>
@@ -668,7 +818,10 @@ if __name__ == '__main__':
     <div class="annotation-container">
         <div class="menu-bar">
             <h1>Human Annotation Interface</h1>
-            <a href="/" class="menu-button">View Review Interface</a>
+            <div>
+                <a href="/" class="menu-button">Review Interface</a>
+                <a href="/stats" class="menu-button">View Statistics</a>
+            </div>
         </div>
         
         <div class="controls">
@@ -967,6 +1120,316 @@ if __name__ == '__main__':
         
         // Load data when page loads
         window.addEventListener('DOMContentLoaded', loadData);
+    </script>
+</body>
+</html>''')
+
+    # Create the statistics page HTML template
+    with open('templates/stats_page.html', 'w') as f:
+        f.write('''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Context-Reaction Experiment Statistics</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+        }
+        .stats-container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .stats-card {
+            border: 1px solid #ddd;
+            margin-bottom: 20px;
+            padding: 20px;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .stats-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .menu-button {
+            padding: 8px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .metric-card {
+            background-color: white;
+            border: 1px solid #eee;
+            border-radius: 5px;
+            padding: 15px;
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .metric-label {
+            color: #666;
+            font-size: 14px;
+        }
+        .chart-container {
+            height: 300px;
+            margin-top: 20px;
+        }
+        .loading {
+            text-align: center;
+            padding: 50px;
+            font-size: 18px;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="stats-container">
+        <div class="stats-header">
+            <h1>Context-Reaction Experiment Statistics</h1>
+            <div>
+                <a href="/" class="menu-button">Review Interface</a>
+                <a href="/annotate" class="menu-button">Annotation Interface</a>
+            </div>
+        </div>
+        
+        <div id="stats-content">
+            <div class="loading">Loading statistics...</div>
+        </div>
+    </div>
+
+    <script>
+        // Load statistics data
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats-data');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const stats = await response.json();
+                renderStats(stats);
+            } catch (error) {
+                console.error('Error loading statistics:', error);
+                document.getElementById('stats-content').innerHTML = 
+                    `<div class="error">Error loading statistics: ${error.message}</div>`;
+            }
+        }
+        
+        // Render the statistics
+        function renderStats(stats) {
+            const container = document.getElementById('stats-content');
+            container.innerHTML = '';
+            
+            // Overview section
+            const overviewSection = document.createElement('div');
+            overviewSection.className = 'stats-card';
+            overviewSection.innerHTML = `
+                <h2>Overview</h2>
+                <div class="stats-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Total Entries</div>
+                        <div class="metric-value">${stats.total}</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Human Annotated</div>
+                        <div class="metric-value">${stats.human_annotated}</div>
+                        <div class="metric-label">${((stats.human_annotated / stats.total) * 100).toFixed(1)}% of total</div>
+                    </div>
+                </div>
+            `;
+            container.appendChild(overviewSection);
+            
+            // Accuracy comparison section
+            const accuracySection = document.createElement('div');
+            accuracySection.className = 'stats-card';
+            accuracySection.innerHTML = `
+                <h2>Accuracy Comparison</h2>
+                <div class="stats-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Model Accuracy</div>
+                        <div class="metric-value">${stats.model_accuracy.toFixed(1)}%</div>
+                        <div class="metric-label">${stats.model_correct} / ${stats.total} correct</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Human Accuracy</div>
+                        <div class="metric-value">${stats.human_accuracy.toFixed(1)}%</div>
+                        <div class="metric-label">${stats.human_correct} / ${stats.human_annotated} correct</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Human-Model Agreement</div>
+                        <div class="metric-value">${stats.agreement_rate.toFixed(1)}%</div>
+                        <div class="metric-label">${stats.agreement_count} / ${stats.human_annotated} entries</div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="accuracy-chart"></canvas>
+                </div>
+            `;
+            container.appendChild(accuracySection);
+            
+            // Confidence analysis section
+            const confidenceSection = document.createElement('div');
+            confidenceSection.className = 'stats-card';
+            confidenceSection.innerHTML = `
+                <h2>Confidence Analysis</h2>
+                <div class="chart-container">
+                    <canvas id="confidence-chart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <canvas id="confidence-accuracy-chart"></canvas>
+                </div>
+            `;
+            container.appendChild(confidenceSection);
+            
+            // Create charts
+            createAccuracyChart(stats);
+            createConfidenceDistributionChart(stats);
+            createConfidenceAccuracyChart(stats);
+        }
+        
+        // Create accuracy comparison chart
+        function createAccuracyChart(stats) {
+            const ctx = document.getElementById('accuracy-chart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Model', 'Human'],
+                    datasets: [{
+                        label: 'Accuracy (%)',
+                        data: [stats.model_accuracy, stats.human_accuracy],
+                        backgroundColor: [
+                            'rgba(54, 162, 235, 0.6)',
+                            'rgba(75, 192, 192, 0.6)'
+                        ],
+                        borderColor: [
+                            'rgba(54, 162, 235, 1)',
+                            'rgba(75, 192, 192, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Accuracy (%)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Model vs Human Accuracy'
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Create confidence distribution chart
+        function createConfidenceDistributionChart(stats) {
+            const ctx = document.getElementById('confidence-chart').getContext('2d');
+            const confidenceLevels = [1, 2, 3, 4, 5];
+            const confidenceCounts = confidenceLevels.map(level => stats.confidence_distribution[level]);
+            
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Very Uncertain (1)', 'Somewhat Uncertain (2)', 'Moderate (3)', 'Confident (4)', 'Very Confident (5)'],
+                    datasets: [{
+                        label: 'Number of Annotations',
+                        data: confidenceCounts,
+                        backgroundColor: 'rgba(153, 102, 255, 0.6)',
+                        borderColor: 'rgba(153, 102, 255, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Count'
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Distribution of Confidence Levels'
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Create confidence vs accuracy chart
+        function createConfidenceAccuracyChart(stats) {
+            const ctx = document.getElementById('confidence-accuracy-chart').getContext('2d');
+            const confidenceLevels = [1, 2, 3, 4, 5];
+            const accuracyByConfidence = confidenceLevels.map(level => stats.confidence_accuracy[level]);
+            
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: ['Very Uncertain (1)', 'Somewhat Uncertain (2)', 'Moderate (3)', 'Confident (4)', 'Very Confident (5)'],
+                    datasets: [{
+                        label: 'Accuracy (%)',
+                        data: accuracyByConfidence,
+                        backgroundColor: 'rgba(255, 159, 64, 0.6)',
+                        borderColor: 'rgba(255, 159, 64, 1)',
+                        borderWidth: 2,
+                        tension: 0.1,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Accuracy (%)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Accuracy by Confidence Level'
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Load data when page loads
+        window.addEventListener('DOMContentLoaded', loadStats);
     </script>
 </body>
 </html>''')
