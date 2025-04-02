@@ -48,6 +48,10 @@ def buffalo_face_detection(model, image):
         bbox = face.bbox.astype(int)
         x1, y1, x2, y2 = bbox
         conf = face.det_score
+
+        if conf < 0.5:  # Skip faces with low confidence
+            continue
+
         boxes.append([x1, y1, x2, y2, conf])
 
         # Extract pose information (pitch, yaw, roll)
@@ -178,26 +182,6 @@ def calculate_pose_difference(pose1, pose2):
     }
 
 
-def is_blurry(image, threshold=100.0):
-    """Check if an image is blurry using Laplacian variance."""
-    # Check if image is valid
-    if image.size == 0 or image.shape[0] < 10 or image.shape[1] < 10:
-        return True, 0.0  # Consider invalid images as blurry
-
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    variance = cv2.Laplacian(gray, cv2.CV_64F).var()
-
-    # Adaptive threshold based on image size
-    # Smaller faces need lower thresholds
-    area = image.shape[0] * image.shape[1]
-    # Adjust threshold based on face size
-    adaptive_threshold = threshold * (area / 10000)
-    # Keep within reasonable bounds
-    adaptive_threshold = max(50.0, min(adaptive_threshold, 150.0))
-
-    return variance < adaptive_threshold, variance
-
-
 def filter_faces(boxes, image, min_height_ratio=0.1, blur_threshold=100.0):
     """Filter faces based on size and blurriness."""
     img_height = image.shape[0]
@@ -213,17 +197,6 @@ def filter_faces(boxes, image, min_height_ratio=0.1, blur_threshold=100.0):
         # Check if face is large enough
         if face_height < min_face_height:
             rejected_reasons.append(("too_small", box))
-            continue
-
-        # Check if face is not blurry
-        face_img = image[y1:y2, x1:x2]
-        if face_img.size == 0:  # Skip if face region is invalid
-            rejected_reasons.append(("invalid_region", box))
-            continue
-
-        is_face_blurry, variance = is_blurry(face_img, blur_threshold)
-        if is_face_blurry:
-            rejected_reasons.append(("blurry", box, variance))
             continue
 
         filtered_boxes.append(box)
@@ -271,7 +244,7 @@ def main():
     print(f"Found {len(frame_paths)} frames")
 
     # Process a subset of frames for comparison
-    num_frames = min(50, len(frame_paths))  # Process up to 200 frames
+    num_frames = min(100, len(frame_paths))  # Process up to 200 frames
 
     # Randomly select frames with a fixed seed for reproducibility
     random.seed(42)  # Set seed for reproducibility

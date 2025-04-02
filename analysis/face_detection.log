@@ -1,0 +1,33 @@
+Performance Comparison:
+YOLOv8n-face: 20.13 FPS (avg inference: 49.68 ms)
+Buffalo-L: 2.85 FPS (avg inference: 350.68 ms)
+Buffalo-S: 7.99 FPS (avg inference: 125.20 ms)
+AntelopeV2: 2.37 FPS (avg inference: 421.48 ms)
+
+Comparison with AntelopeV2 (Reference Model):
+
+YOLOv8n-face vs AntelopeV2:
+Face detection rate: 129/155 (83.23% of AntelopeV2 faces)
+Average IoU: 0.9382
+Average center distance: 4.48 pixels
+Average width difference: 2.69%
+Average height difference: 2.38%
+
+Buffalo-L vs AntelopeV2:
+Face detection rate: 155/155 (100.00% of AntelopeV2 faces)
+Average IoU: 1.0000
+Average center distance: 0.00 pixels
+Average width difference: 0.00%
+Average height difference: 0.00%
+Average detection score difference: 0.0000
+Average pose difference: 0.00 degrees
+
+Buffalo-S vs AntelopeV2:
+Face detection rate: 143/155 (92.26% of AntelopeV2 faces)
+Average IoU: 0.9160
+Average center distance: 5.56 pixels
+Average width difference: 3.29%
+Average height difference: 3.21%
+Average detection score difference: 0.0426
+Average pose difference: 0.80 degrees
+Results saved to output/face_detection_comparison
