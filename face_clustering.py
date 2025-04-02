@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 import random
+import json
 
 # Define paths
 input_dir = 'output/faces'
@@ -18,6 +19,11 @@ tracked_faces_dir = 'output/asd'  # Directory with tracked faces
 output_dir = 'output/clustered_faces'
 # Specify the video ID to process
 target_video_id = "jajw-8Bj_Ys"
+
+# Remove output directory if it exists
+# if os.path.exists(output_dir):
+#     shutil.rmtree(output_dir)
+
 
 # Create output directory if it doesn't exist
 os.makedirs(output_dir, exist_ok=True)
@@ -44,6 +50,18 @@ if os.path.exists(video_path):
         if not os.path.isdir(scene_path) or not scene_dir.startswith('Scene-'):
             continue
 
+        # Get face sizes from the Scene JSON file
+        scene_json_path = os.path.join(video_path, f"{scene_dir}.json")
+        face_sizes = []
+
+        scene_data = None
+        if os.path.exists(scene_json_path):
+            try:
+                with open(scene_json_path, 'r') as f:
+                    scene_data = json.load(f)
+            except Exception as e:
+                print(f"Error reading scene JSON: {e}")
+
         # Find all track directories
         for item in os.listdir(scene_path):
             track_dir = os.path.join(scene_path, item)
@@ -53,9 +71,27 @@ if os.path.exists(video_path):
                                if f.endswith('.jpg') or f.endswith('.png')]
 
                 if face_images:
+                    # Find the track that matches our track_idx
+                    track_idx = int(os.path.basename(track_dir).split('_')[1])
+                    for track in scene_data.get('tracks', []):
+                        if track.get('track_idx') == track_idx:
+                            # Get the face sizes from proc_track.s
+                            face_sizes = track.get(
+                                'proc_track', {}).get('s', [])
+                            break
+
                     # Filter for faces that are large enough
-                    valid_faces = [f for f in face_images if get_face_size(
-                        f) >= 108]  # 10% of 1080px
+                    if face_sizes:
+                        # Use the sizes from the JSON file
+                        valid_faces = []
+                        for i, face_image in enumerate(face_images):
+                            # 10% of 1080px
+                            if i < len(face_sizes) and face_sizes[i] >= 108:
+                                valid_faces.append(face_image)
+                    else:
+                        # Fall back to the original method if JSON data isn't available
+                        valid_faces = [
+                            f for f in face_images if get_face_size(f) >= 108]
 
                     if valid_faces:
                         track_key = f"{target_video_id}_{scene_dir}_{item}"
@@ -71,80 +107,80 @@ valid_track_keys = []
 # Define embeddings cache file
 embeddings_cache_file = f'output/embeddings_{target_video_id}.npz'
 
+# Create a dictionary to store cached embeddings
+cached_embeddings = {}
+
 # Check if embeddings cache exists
 if os.path.exists(embeddings_cache_file):
     print(f"Loading embeddings from cache: {embeddings_cache_file}")
     cache_data = np.load(embeddings_cache_file, allow_pickle=True)
-    embeddings = cache_data['embeddings']
-    valid_track_keys = cache_data['track_keys'].tolist()
-    print(f"Loaded {len(embeddings)} embeddings from cache")
-else:
-    print("Calculating embeddings (this may take a while)...")
-    for track_key in tqdm(track_keys, desc="Extracting embeddings for tracks"):
-        face_paths = track_paths[track_key]
+    cached_embeddings_array = cache_data['embeddings']
+    cached_track_keys = cache_data['track_keys'].tolist()
 
-        # Select up to 5 temporally distant frames
-        if len(face_paths) > 5:
-            # Sort by filename which should preserve temporal order
-            face_paths.sort()
-            # Take evenly spaced samples
-            step = len(face_paths) // 5
-            selected_faces = face_paths[::step][:5]
-        else:
-            selected_faces = face_paths
+    # Create a dictionary mapping track keys to embeddings
+    for i, track_key in enumerate(cached_track_keys):
+        cached_embeddings[track_key] = cached_embeddings_array[i]
 
-        track_embeddings = []
+    print(f"Loaded {len(cached_embeddings)} embeddings from cache")
 
-        # Extract embeddings for each selected face in the track
-        for face_path in selected_faces:
-            try:
-                embedding = DeepFace.represent(
-                    face_path, model_name="ArcFace", enforce_detection=False,
-                    normalization="ArcFace", align=True)[0]["embedding"]
-                track_embeddings.append(embedding)
-            except Exception as e:
-                print(f"Error processing {face_path}: {e}")
+print("Processing embeddings for tracks...")
+for track_key in tqdm(track_keys, desc="Extracting embeddings for tracks"):
+    # Check if we already have this embedding in cache
+    if track_key in cached_embeddings:
+        embeddings.append(cached_embeddings[track_key])
+        valid_track_keys.append(track_key)
+        continue
 
-        # Only use tracks where we could extract at least one embedding
-        if track_embeddings:
-            # Average the embeddings for this track
-            avg_embedding = np.mean(track_embeddings, axis=0)
-            embeddings.append(avg_embedding)
-            valid_track_keys.append(track_key)
+    # If not in cache, calculate the embedding
+    face_paths = track_paths[track_key]
 
-    embeddings = np.array(embeddings)
-    print(f"Successfully processed {len(embeddings)} tracks")
+    # Select up to 5 temporally distant frames
+    if len(face_paths) > 5:
+        # Sort by filename which should preserve temporal order
+        face_paths.sort()
+        # Take evenly spaced samples
+        step = len(face_paths) // 5
+        selected_faces = face_paths[::step][:5]
+    else:
+        selected_faces = face_paths
 
-    # Save embeddings to cache
-    print(f"Saving embeddings to cache: {embeddings_cache_file}")
-    np.savez(embeddings_cache_file,
-             embeddings=embeddings,
-             track_keys=np.array(valid_track_keys, dtype=object))
+    track_embeddings = []
 
-# Try different clustering methods
-print("Trying different clustering methods...")
+    # Extract embeddings for each selected face in the track
+    for face_path in selected_faces:
+        try:
+            result = DeepFace.represent(
+                face_path, model_name="ArcFace", enforce_detection=False,
+                normalization="ArcFace", align=False)[0]
+            embedding = result["embedding"]
+            # Print face confidence if available
+            if "face_confidence" in result:
+                print(
+                    f"Face confidence for {face_path}: {result['face_confidence']}")
+            track_embeddings.append(embedding)
+        except Exception as e:
+            print(f"Error processing {face_path}: {e}")
 
-# 1. Try KMeans with different numbers of clusters
-best_score = -1
-best_k = 0
-best_labels = None
+    # Only use tracks where we could extract at least five embedding
+    if track_embeddings and len(track_embeddings) > 5:
+        # Average the embeddings for this track
+        avg_embedding = np.mean(track_embeddings, axis=0)
+        embeddings.append(avg_embedding)
+        valid_track_keys.append(track_key)
+        # Add to cache dictionary
+        cached_embeddings[track_key] = avg_embedding
 
-for k in range(10, 20):
-    kmeans = KMeans(n_clusters=k, random_state=42)
-    labels = kmeans.fit_predict(embeddings)
+embeddings = np.array(embeddings)
+print(f"Successfully processed {len(embeddings)} tracks")
 
-    # Calculate silhouette score to evaluate clustering quality
-    if len(set(labels)) > 1:  # Need at least 2 clusters for silhouette score
-        score = silhouette_score(embeddings, labels)
-        print(f"KMeans with {k} clusters: silhouette score = {score:.4f}")
-
-        if score > best_score:
-            best_score = score
-            best_k = k
-            best_labels = labels
-
-print(
-    f"\nBest KMeans clustering: {best_k} clusters with silhouette score {best_score:.4f}")
+# Save updated embeddings to cache
+print(f"Saving embeddings to cache: {embeddings_cache_file}")
+# Convert the dictionary back to arrays for saving
+all_track_keys = list(cached_embeddings.keys())
+all_embeddings = np.array([cached_embeddings[k] for k in all_track_keys])
+np.savez(embeddings_cache_file,
+         embeddings=all_embeddings,
+         track_keys=np.array(all_track_keys, dtype=object))
 
 # 2. Try Agglomerative Clustering with different distance thresholds
 print("\nTrying Agglomerative Clustering...")
@@ -173,18 +209,8 @@ for threshold in [0.5]:
         print(f"  This threshold gives a reasonable number of clusters")
         agg_labels = labels
 
-# Use the best clustering method
-if 'agg_labels' in locals() and len(set(agg_labels)) >= 3:
-    print("\nUsing Agglomerative Clustering results")
-    labels = agg_labels
-elif best_score > 0:
-    print("\nUsing KMeans clustering results")
-    labels = best_labels
-else:
-    print("\nFalling back to default clustering")
-    # Try a much larger eps value for DBSCAN
-    clustering = DBSCAN(eps=3.0, min_samples=5).fit(embeddings)
-    labels = clustering.labels_
+print("\nUsing Agglomerative Clustering results")
+labels = agg_labels
 
 # Visualize the chosen clustering
 pca = PCA(n_components=2)
@@ -234,9 +260,14 @@ for label, track_keys_list in tracks_by_cluster.items():
         # Get all faces for this track
         face_paths = track_paths[track_key]
 
+        # Skip tracks with no valid faces
+        if len(face_paths) == 0:
+            print(f"Skipping track with no valid faces: {track_key}")
+            continue
+
         # Choose a representative face (middle of the track)
         representative_face = face_paths[len(face_paths) // 2]
 
         # Create a filename that preserves track information
-        filename = f"{i:04d}_{os.path.basename(representative_face)}"
+        filename = f"{i:04d}_{track_key}_{os.path.basename(representative_face)}"
         shutil.copy(representative_face, os.path.join(identity_dir, filename))
