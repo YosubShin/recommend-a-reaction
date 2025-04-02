@@ -13,3 +13,5 @@ openai
 pydantic
 flask
 pandas
+insightface
+onnxruntime

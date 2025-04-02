@@ -1,17 +1,15 @@
+from insightface.app import FaceAnalysis
 import os
 import shutil
 import numpy as np
-from deepface import DeepFace
-from sklearn.cluster import DBSCAN, KMeans, AgglomerativeClustering
+from sklearn.cluster import AgglomerativeClustering
 import cv2
 from tqdm import tqdm
-import glob
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score
-import random
 import json
+import os.path as osp
 
 # Define paths
 input_dir = 'output/faces'
@@ -20,9 +18,24 @@ output_dir = 'output/clustered_faces'
 # Specify the video ID to process
 target_video_id = "jajw-8Bj_Ys"
 
+
+def get_image(image_file, to_rgb=False):
+
+    if not osp.exists(image_file):
+        raise FileNotFoundError(f'{image_file} not found')
+    img = cv2.imread(image_file)
+    if to_rgb:
+        img = img[:, :, ::-1]
+    return img
+
+
+app = FaceAnalysis(name='antelopev2')  # or use 'buffalo_l' for more speed
+app.prepare(ctx_id=-1, det_size=(160, 160))  # or -1 for CPU
+
+
 # Remove output directory if it exists
-# if os.path.exists(output_dir):
-#     shutil.rmtree(output_dir)
+if os.path.exists(output_dir):
+    shutil.rmtree(output_dir)
 
 
 # Create output directory if it doesn't exist
@@ -148,21 +161,15 @@ for track_key in tqdm(track_keys, desc="Extracting embeddings for tracks"):
 
     # Extract embeddings for each selected face in the track
     for face_path in selected_faces:
-        try:
-            result = DeepFace.represent(
-                face_path, model_name="ArcFace", enforce_detection=False,
-                normalization="ArcFace", align=False)[0]
-            embedding = result["embedding"]
-            # Print face confidence if available
-            if "face_confidence" in result:
-                print(
-                    f"Face confidence for {face_path}: {result['face_confidence']}")
-            track_embeddings.append(embedding)
-        except Exception as e:
-            print(f"Error processing {face_path}: {e}")
+        faces = app.get(get_image(face_path), max_num=1)
+        if len(faces) == 0:
+            print(f"No face detected in {face_path}")
+            continue
+        embedding = faces[0].normed_embedding  # 512D vector
+        track_embeddings.append(embedding)
 
     # Only use tracks where we could extract at least five embedding
-    if track_embeddings and len(track_embeddings) > 5:
+    if track_embeddings and len(track_embeddings) >= 5:
         # Average the embeddings for this track
         avg_embedding = np.mean(track_embeddings, axis=0)
         embeddings.append(avg_embedding)
