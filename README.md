@@ -8,20 +8,22 @@ On Koa:
 module load vis/FFmpeg
 ```
 
-# Login to Hugging Face for downloading Gemma3 model. (Not needed on non-NVIDIA environment)
+## Login to Hugging Face for downloading Gemma3 model.
+
+(Not needed on non-NVIDIA environment)
 
 ```
 huggingface-cli login
 ```
 
 
-# Download models
+## Download models
 
 ```
 python download_models.py
 ```
 
-# Update video ids
+## Update video ids (optional)
 If you want to use different videos or add more videos, you can add YouTube video ids to `video_ids.txt` file.
 
 # Commands
