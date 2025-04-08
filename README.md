@@ -1,15 +1,14 @@
 # Prerequisites
 
 ## Install ffmpeg
+You have to have ffmpeg & ffprobe in your path. Install them accordingly.
 
 ```
-ffmpeg
-
 On Koa:
 module load vis/FFmpeg
 ```
 
-# Login to Hugging Face for downloading Gemma3 model
+# Login to Hugging Face for downloading Gemma3 model. (Not needed on non-NVIDIA environment)
 
 ```
 huggingface-cli login
