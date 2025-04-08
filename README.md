@@ -16,17 +16,30 @@ huggingface-cli login
 ```
 
 
-## Download models
+# Download models
 
 ```
 python download_models.py
 ```
 
+# Update video ids
+If you want to use different videos or add more videos, you can add YouTube video ids to `video_ids.txt` file.
+
 # Commands
 
 ```
-# Activate conda environment
-source activate rec-a-reaction
+# Create a new conda environment
+conda create --name rec-a-reaction python=3.9
 
-python download_and_preprocess.py --output_dir=/home/yosubs/koa_scratch/recommend-a-reaction --workers=1
+# Activate conda environment
+conda activate rec-a-reaction
+
+# Install packages
+pip install -r requirements.txt
+
+# Download and pre-process videos
+python download_and_preprocess.py --output_dir=<path_to_output_dir> --workers=1
+
+# Extract context-reaction pairs
+python extract_context_reaction_pairs.py <path_to_output_dir>
 ```
